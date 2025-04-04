@@ -55,26 +55,36 @@ func (m *MockServer) Close() {
 
 // SetRejectConnection configures whether the server should reject new connections
 func (m *MockServer) SetRejectConnection(reject bool) {
+	m.connectionsMu.Lock()
+	defer m.connectionsMu.Unlock()
 	m.shouldRejectConnection = reject
 }
 
 // SetDropConnection configures whether the server should drop existing connections
 func (m *MockServer) SetDropConnection(drop bool) {
+	m.connectionsMu.Lock()
+	defer m.connectionsMu.Unlock()
 	m.shouldDropConnection = drop
 }
 
 // OnConnect sets a callback for when a client connects
 func (m *MockServer) OnConnect(callback func(*websocket.Conn)) {
+	m.connectionsMu.Lock()
+	defer m.connectionsMu.Unlock()
 	m.onConnect = callback
 }
 
 // OnDisconnect sets a callback for when a client disconnects
 func (m *MockServer) OnDisconnect(callback func(*websocket.Conn)) {
+	m.connectionsMu.Lock()
+	defer m.connectionsMu.Unlock()
 	m.onDisconnect = callback
 }
 
 // OnMessage sets a callback for when a message is received
 func (m *MockServer) OnMessage(callback func(*websocket.Conn, []byte)) {
+	m.connectionsMu.Lock()
+	defer m.connectionsMu.Unlock()
 	m.onMessage = callback
 }
 
@@ -155,25 +165,37 @@ func (m *MockServer) handleConnection(w http.ResponseWriter, r *http.Request) {
 	}
 
 	m.addConnection(conn)
-	if m.onConnect != nil {
-		m.onConnect(conn)
+
+	// Use a mutex to protect onConnect callback access
+	var onConnectCopy func(*websocket.Conn)
+	m.connectionsMu.RLock()
+	onConnectCopy = m.onConnect
+	m.connectionsMu.RUnlock()
+
+	if onConnectCopy != nil {
+		onConnectCopy(conn)
 	}
 
 	defer func() {
 		m.removeConnection(conn)
-		if m.onDisconnect != nil {
-			m.onDisconnect(conn)
+
+		// Use a mutex to protect onDisconnect callback access
+		m.connectionsMu.RLock()
+		onDisconnectCopy := m.onDisconnect
+		m.connectionsMu.RUnlock()
+
+		if onDisconnectCopy != nil {
+			onDisconnectCopy(conn)
 		}
 		conn.Close()
 	}()
 
-	// Immediately store the connection in our buffer
-	// This is critical for TestConnectorReconnection which tracks connection count
-	m.connectionsMu.Lock()
-	m.connectionsMu.Unlock()
-
 	for {
-		if m.shouldDropConnection {
+		m.connectionsMu.RLock()
+		shouldDrop := m.shouldDropConnection
+		m.connectionsMu.RUnlock()
+
+		if shouldDrop {
 			return
 		}
 
@@ -189,8 +211,12 @@ func (m *MockServer) handleConnection(w http.ResponseWriter, r *http.Request) {
 			m.connectionsMu.Unlock()
 
 			// Call message handler if set
-			if m.onMessage != nil {
-				m.onMessage(conn, message)
+			m.connectionsMu.RLock()
+			onMessageCopy := m.onMessage
+			m.connectionsMu.RUnlock()
+
+			if onMessageCopy != nil {
+				onMessageCopy(conn, message)
 			}
 
 			// Echo message back by default

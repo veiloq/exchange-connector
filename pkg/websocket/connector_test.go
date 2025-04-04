@@ -131,8 +131,11 @@ func TestRealConnector(t *testing.T) {
 
 	// Track connection events
 	var connectCount int
+	var connectMu sync.Mutex // Add mutex for thread safety
 	mock.OnConnect(func(conn *websocket.Conn) {
+		connectMu.Lock()
 		connectCount++
+		connectMu.Unlock()
 	})
 
 	// Create connector with test configuration
@@ -149,7 +152,12 @@ func TestRealConnector(t *testing.T) {
 	err := connector.Connect(ctx)
 	require.NoError(t, err)
 	assert.True(t, connector.IsConnected())
-	assert.Equal(t, 1, connectCount)
+
+	// Safely read connection count
+	connectMu.Lock()
+	count := connectCount
+	connectMu.Unlock()
+	assert.Equal(t, 1, count)
 
 	// Test message handling
 	messageReceived := make(chan []byte)
