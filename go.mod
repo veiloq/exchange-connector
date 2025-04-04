@@ -1,6 +1,6 @@
 module github.com/veiloq/exchange-connector
 
-go 1.21
+go 1.24
 
 require (
 	github.com/avast/retry-go v3.0.0+incompatible
