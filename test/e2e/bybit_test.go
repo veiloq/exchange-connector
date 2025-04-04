@@ -7,11 +7,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/avast/retry-go"
+	retry "github.com/avast/retry-go"
+	"github.com/stretchr/testify/require"
 	"github.com/veiloq/exchange-connector/pkg/exchanges/bybit"
 	"github.com/veiloq/exchange-connector/pkg/exchanges/interfaces"
 	"github.com/veiloq/exchange-connector/pkg/logging"
-	"github.com/stretchr/testify/require"
 )
 
 // TestBybitConnector_E2E performs end-to-end testing of the Bybit connector

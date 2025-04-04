@@ -153,6 +153,28 @@ func TestRealConnector(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, connector.IsConnected())
 
+	// Wait for the connection count to be updated with a timeout
+	connectionEstablished := make(chan bool, 1)
+	go func() {
+		for {
+			connectMu.Lock()
+			count := connectCount
+			connectMu.Unlock()
+			if count > 0 {
+				connectionEstablished <- true
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}()
+
+	select {
+	case <-connectionEstablished:
+		// Connection established, continue test
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for connection to be established")
+	}
+
 	// Safely read connection count
 	connectMu.Lock()
 	count := connectCount
