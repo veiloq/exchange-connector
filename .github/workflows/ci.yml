@@ -29,6 +29,7 @@ jobs:
       with:
         version: v1.54.2
         args: --timeout=5m
+        skip-cache: true  # Skip using cache to avoid file exists errors
 
     - name: Lint
       run: make lint
