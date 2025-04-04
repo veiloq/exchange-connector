@@ -121,6 +121,7 @@ connector := bybit.NewConnector(options)
 - Go 1.21 or higher
 - Make
 - golangci-lint
+- GitHub CLI (gh) for release management
 
 ### Setup
 
@@ -150,8 +151,47 @@ This project uses GitHub Actions for Continuous Integration and Deployment. The 
 - Race condition detection
 - End-to-end tests
 - Coverage reporting
+- Cross-platform builds for Linux and macOS (including Apple Silicon)
+- Automatic releases
 
 The workflow is triggered on pushes to the main branch and on pull requests.
+
+### Cross-Platform Builds
+
+Build for all platforms at once:
+```bash
+make build-all
+```
+
+Or build for specific platforms:
+```bash
+make build-linux-amd64   # Linux (AMD64)
+make build-linux-arm64   # Linux (ARM64)
+make build-darwin-amd64  # macOS (AMD64)
+make build-darwin-arm64  # macOS (ARM64/Apple Silicon)
+```
+
+All build artifacts are placed in the `build` directory.
+
+### Releases
+
+To create a new release:
+
+1. Update the version number in the `VERSION` file
+2. Run the release command:
+   ```bash
+   make release
+   ```
+
+This will:
+- Build binaries for all supported platforms
+- Create a new GitHub release with the version from the VERSION file
+- Upload all binaries to the release
+
+You can also use the GitHub CLI directly:
+```bash
+gh release create v0.1.0 --title "Exchange Connector v0.1.0" --notes "Release notes..." build/exchange-connector-*
+```
 
 ### Testing
 

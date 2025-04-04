@@ -50,3 +50,6 @@ debug/
 # Project specific
 config.yaml
 config.local.yaml
+
+# Workspace specific
+.specstory/
