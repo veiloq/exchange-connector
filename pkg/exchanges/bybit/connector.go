@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/bybit/pkg/exchanges/interfaces"
-	"github.com/bybit/pkg/websocket"
+	"github.com/veiloq/exchange-connector/pkg/exchanges/interfaces"
+	"github.com/veiloq/exchange-connector/pkg/websocket"
 )
 
 type Connector struct {

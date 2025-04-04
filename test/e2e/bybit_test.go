@@ -8,9 +8,9 @@ import (
 	"time"
 
 	"github.com/avast/retry-go"
-	"github.com/bybit/pkg/exchanges/bybit"
-	"github.com/bybit/pkg/exchanges/interfaces"
-	"github.com/bybit/pkg/logging"
+	"github.com/veiloq/exchange-connector/pkg/exchanges/bybit"
+	"github.com/veiloq/exchange-connector/pkg/exchanges/interfaces"
+	"github.com/veiloq/exchange-connector/pkg/logging"
 	"github.com/stretchr/testify/require"
 )
 

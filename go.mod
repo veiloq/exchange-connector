@@ -1,4 +1,4 @@
-module github.com/bybit
+module github.com/veiloq/exchange-connector
 
 go 1.21
 

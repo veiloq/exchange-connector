@@ -10,8 +10,8 @@ import (
 	"net/http/httputil"
 	"time"
 
-	"github.com/bybit/pkg/logging"
-	"github.com/bybit/pkg/ratelimit"
+	"github.com/veiloq/exchange-connector/pkg/logging"
+	"github.com/veiloq/exchange-connector/pkg/ratelimit"
 )
 
 // DebugClientConfig holds configuration for the HTTP debug client

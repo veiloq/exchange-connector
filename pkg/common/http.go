@@ -10,8 +10,8 @@ import (
 	"time"
 
 	"github.com/avast/retry-go"
-	"github.com/bybit/pkg/logging"
-	"github.com/bybit/pkg/ratelimit"
+	"github.com/veiloq/exchange-connector/pkg/logging"
+	"github.com/veiloq/exchange-connector/pkg/ratelimit"
 )
 
 // HTTPClient defines the interface for making HTTP requests

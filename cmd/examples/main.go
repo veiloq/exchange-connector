@@ -7,9 +7,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/bybit/pkg/exchanges/bybit"
-	"github.com/bybit/pkg/exchanges/interfaces"
-	"github.com/bybit/pkg/logging"
+	"github.com/veiloq/exchange-connector/pkg/exchanges/bybit"
+	"github.com/veiloq/exchange-connector/pkg/exchanges/interfaces"
+	"github.com/veiloq/exchange-connector/pkg/logging"
 )
 
 func main() {

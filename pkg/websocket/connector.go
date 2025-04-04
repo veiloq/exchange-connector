@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/avast/retry-go"
-	"github.com/bybit/pkg/logging"
+	"github.com/veiloq/exchange-connector/pkg/logging"
 	"github.com/gorilla/websocket"
 )
 

@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/avast/retry-go"
-	"github.com/bybit/pkg/logging"
+	"github.com/veiloq/exchange-connector/pkg/logging"
 )
 
 // DebugClientExample demonstrates how to use the debug HTTP client
