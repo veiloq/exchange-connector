@@ -1,3 +1,90 @@
+// Package interfaces defines the core abstractions for interacting with cryptocurrency exchanges.
+// It provides a unified interface layer that allows the application to work with multiple
+// exchange platforms through a consistent API, abstracting away the implementation details
+// specific to each exchange.
+//
+// This package contains:
+//
+// 1. The ExchangeConnector interface - The primary abstraction for exchange operations, including:
+//   - Market data retrieval (candles, tickers, order books)
+//   - WebSocket subscriptions for real-time data
+//   - Connection lifecycle management
+//
+// 2. Data structures representing exchange concepts:
+//   - Candle: OHLCV price data over specific time intervals
+//   - Ticker: Current market snapshot with latest price and volume
+//   - OrderBook: Current market depth with bid/ask orders
+//
+// 3. Configuration options for exchange connections
+//
+// Architecture Integration:
+//
+// The interfaces package is the central hub that connects various components:
+//
+//   - Exchange Implementations: Concrete exchange implementations (like Bybit, Binance)
+//     implement these interfaces to provide exchange-specific functionality
+//
+//   - pkg/websocket: Exchange connectors use the WebSocket package for real-time
+//     market data subscriptions
+//
+//   - pkg/common/http: Exchange connectors use the HTTP client for REST API interactions
+//     with exchanges
+//
+//   - pkg/ratelimit: Exchange connectors configure rate limiters based on the
+//     specific exchange's API constraints
+//
+//   - pkg/logging: Logging is used throughout exchange connectors for operational
+//     visibility and troubleshooting
+//
+// This architectural approach provides several benefits:
+//
+// 1. Interchangeability: Different exchanges can be used with the same application code
+// 2. Testability: Mock implementations can be used for testing
+// 3. Modularity: Components can evolve independently
+// 4. Extensibility: New exchanges can be added without changing core application logic
+//
+// The interfaces defined here focus on market data operations, but could be
+// extended to include trading operations in future versions.
+//
+// Typical usage pattern:
+//
+//	// Create exchange-specific connector with options
+//	options := interfaces.NewExchangeOptions()
+//	options.APIKey = "your-api-key"
+//	options.APISecret = "your-api-secret"
+//
+//	connector := bybit.NewConnector(options) // implements ExchangeConnector
+//
+//	// Connect to the exchange
+//	ctx := context.Background()
+//	if err := connector.Connect(ctx); err != nil {
+//	    log.Fatalf("Failed to connect: %v", err)
+//	}
+//	defer connector.Close()
+//
+//	// Get historical candle data
+//	candles, err := connector.GetCandles(ctx, interfaces.CandleRequest{
+//	    Symbol:    "BTCUSDT",
+//	    Interval:  "1h",
+//	    StartTime: time.Now().Add(-24 * time.Hour),
+//	    EndTime:   time.Now(),
+//	    Limit:     24,
+//	})
+//
+//	// Subscribe to real-time order book updates
+//	err = connector.SubscribeOrderBook(ctx, []string{"BTCUSDT"}, func(book interfaces.OrderBook) {
+//	    // Process order book update
+//	    fmt.Printf("Best bid: %f, Best ask: %f\n", book.Bids[0].Price, book.Asks[0].Price)
+//	})
+//
+// Implementation notes:
+// - Exchange connectors should be thread-safe
+// - They should handle reconnection automatically where possible
+// - They should normalize data from exchange-specific formats to the interface-defined types
+// - Rate limiting should be implemented internally to respect exchange API constraints
+//
+// This package is designed to be extended with new exchange implementations
+// without requiring changes to the core application logic.
 package interfaces
 
 import (
@@ -143,6 +230,10 @@ type ExchangeOptions struct {
 	// APISecret is the secret key paired with the API key.
 	// Required for generating signatures for authenticated requests.
 	APISecret string
+
+	// BaseURL is the base URL for the exchange API endpoints.
+	// This can be used to override the default URL for testing or custom proxy scenarios.
+	BaseURL string
 
 	// HTTPTimeout specifies the maximum duration to wait for HTTP requests.
 	// This applies to all REST API calls to the exchange.

@@ -1,7 +1,7 @@
 # Include .env file if it exists
 -include .env
 
-.PHONY: all build test test-race test-cover lint fmt clean e2e-test build-all build-linux-amd64 build-linux-arm64 build-darwin-amd64 build-darwin-arm64 help
+.PHONY: all build test test-race test-cover lint fmt clean e2e-test build-all build-linux-amd64 build-linux-arm64 build-darwin-amd64 build-darwin-arm64 help install-tools generate-mocks run-example release get-openapi install-openapi-generator
 
 # Go parameters
 GOCMD=go
@@ -257,6 +257,51 @@ clean:
 install-tools:
 	$(GOGET) github.com/golangci/golangci-lint/cmd/golangci-lint@latest
 
+# TARGET: install-openapi-generator
+#
+# DESCRIPTION:
+#   Installs OpenAPI Generator CLI ✅
+#
+# PREREQUISITES:
+#   - Java Runtime Environment (JRE)
+#   - npm (for the npm installation method)
+#
+# USAGE EXAMPLES:
+#   - make install-openapi-generator
+#
+# EXPLANATION:
+#   Installs OpenAPI Generator CLI. This target uses npm, but you can
+#   modify it to use other installation methods if preferred.
+install-openapi-generator:
+	@echo "Installing OpenAPI Generator CLI..."
+	@if command -v npm > /dev/null; then \
+		npm install -g @openapitools/openapi-generator-cli; \
+	else \
+		echo "Error: npm not found. Please install Node.js and npm first."; \
+		exit 1; \
+	fi
+	@echo "✅ OpenAPI Generator installed successfully"
+
+# TARGET: get-openapi
+#
+# DESCRIPTION:
+#   Downloads OpenAPI specifications from official site and places them in docs folder ✅
+#
+# PREREQUISITES:
+#   - curl command
+#
+# USAGE EXAMPLES:
+#   - make get-openapi
+#
+# EXPLANATION:
+#   Creates docs directory if it doesn't exist and downloads the latest OpenAPI specifications
+get-openapi:
+	@echo "Downloading OpenAPI specifications..."
+	@mkdir -p docs
+	@curl -s https://api.bybit.com/v5/portal/specs/v5-open-api.json -o docs/openapi.json
+	@curl -s https://api.bybit.com/v5/portal/specs/v5-websocket.json -o docs/websocket-api.json
+	@echo "✅ OpenAPI specifications downloaded to docs/ directory"
+
 # TARGET: generate-mocks
 #
 # DESCRIPTION:
@@ -348,6 +393,8 @@ help:
 	@echo "  deps             - Download and tidy dependencies"
 	@echo "  clean            - Remove build artifacts and temporary files"
 	@echo "  install-tools    - Install development tools"
+	@echo "  install-openapi-generator - Install OpenAPI Generator CLI"
+	@echo "  get-openapi      - Download OpenAPI specifications"
 	@echo "  generate-mocks   - Generate mock implementations for testing"
 	@echo "  run-example      - Build and run the example application"
 	@echo "  release          - Create a new GitHub release with binaries"

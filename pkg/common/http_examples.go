@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/avast/retry-go"
+	retry "github.com/avast/retry-go"
 	"github.com/veiloq/exchange-connector/pkg/logging"
 )
 

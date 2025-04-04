@@ -1,3 +1,54 @@
+// Package logging provides a structured, leveled logging system for the application.
+// It defines a common logging interface that can be implemented by different
+// logging backends, allowing for flexibility in how logs are processed and stored.
+//
+// The logging package is designed around these key principles:
+//
+//  1. Structured logging: Rather than simple text messages, logs include structured
+//     data (fields) that can be easily parsed, filtered, and analyzed.
+//
+//  2. Leveled logging: Different severity levels (Debug, Info, Warn, Error) allow
+//     for appropriate filtering and handling of log messages.
+//
+//  3. Context-aware: Logging can include context information such as trace IDs
+//     to correlate logs across different parts of the system.
+//
+//  4. Backend-agnostic: The Logger interface can be implemented by different
+//     logging backends (default JSON logger, Zap logger, etc.).
+//
+// Usage example:
+//
+//	// Create a new logger
+//	logger := logging.NewLogger()
+//
+//	// Log at different levels with structured fields
+//	logger.Debug("Connection attempt started",
+//		logging.String("exchange", "bybit"),
+//		logging.String("url", wsURL))
+//
+//	logger.Info("Market data received",
+//		logging.String("symbol", "BTCUSDT"),
+//		logging.Int("data_points", 24))
+//
+//	// Add request context (e.g., for tracking)
+//	ctxLogger := logger.WithContext(ctx)
+//	ctxLogger.Info("Processing request")
+//
+//	// Add persistent fields
+//	exchangeLogger := logger.WithFields(
+//		logging.String("exchange", "bybit"),
+//		logging.String("component", "websocket"))
+//
+//	// Log errors with details
+//	if err != nil {
+//		exchangeLogger.Error("Connection failed",
+//			logging.Error(err),
+//			logging.Int("retry_count", retryCount))
+//	}
+//
+// This package is used throughout the application to provide consistent,
+// structured logging that can be easily integrated with monitoring and
+// observability systems.
 package logging
 
 import (

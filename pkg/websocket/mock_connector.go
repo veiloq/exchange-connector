@@ -12,6 +12,7 @@ type MockConnector struct {
 	connected bool
 	handlers  map[string]MessageHandler
 	messages  chan []byte
+	config    Config
 
 	// For verifying test expectations
 	connectCalls     int
@@ -35,6 +36,12 @@ func NewMockConnector() *MockConnector {
 		messages:         make(chan []byte, 100),
 		subscribeCalls:   make(map[string]int),
 		unsubscribeCalls: make(map[string]int),
+		config: Config{
+			URL:               "ws://mock-server.test",
+			HeartbeatInterval: 20 * 1000000000, // 20 seconds in nanoseconds
+			ReconnectInterval: 5 * 1000000000,  // 5 seconds in nanoseconds
+			MaxRetries:        3,
+		},
 	}
 }
 
@@ -112,6 +119,13 @@ func (m *MockConnector) IsConnected() bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.connected
+}
+
+// GetConfig implements WSConnector interface
+func (m *MockConnector) GetConfig() Config {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.config
 }
 
 // SimulateMessage simulates receiving a message for testing
@@ -193,4 +207,11 @@ func (m *MockConnector) GetCloseCalls() int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.closeCalls
+}
+
+// SetConfig allows setting mock config for testing
+func (m *MockConnector) SetConfig(config Config) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.config = config
 }
