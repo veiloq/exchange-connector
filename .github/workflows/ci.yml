@@ -3,11 +3,13 @@ name: CI
 on:
   push:
     branches: [ main, master ]
+    tags:
+      - 'v*'
   pull_request:
     branches: [ main, master ]
 
 jobs:
-  build:
+  test:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v3
@@ -48,4 +50,124 @@ jobs:
       uses: actions/upload-artifact@v3
       with:
         name: coverage-report
-        path: coverage.html 
+        path: coverage.html
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        goos: [linux, darwin]
+        goarch: [amd64, arm64]
+        include:
+          - goos: linux
+            goarch: amd64
+            platform: linux-amd64
+          - goos: linux
+            goarch: arm64
+            platform: linux-arm64
+          - goos: darwin
+            goarch: amd64
+            platform: darwin-amd64
+          - goos: darwin
+            goarch: arm64
+            platform: darwin-arm64
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.21'
+          check-latest: true
+          cache: true
+
+      - name: Install dependencies
+        run: make deps
+
+      - name: Build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          make build-${{ matrix.goos }}-${{ matrix.goarch }}
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v3
+        with:
+          name: exchange-connector-${{ matrix.platform }}
+          path: build/exchange-connector-${{ matrix.platform }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    # Run only on tag push or manual dispatch
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.21'
+
+      - name: Setup GitHub CLI
+        run: |
+          type -p curl >/dev/null || (sudo apt update && sudo apt install curl -y)
+          curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
+          && sudo chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg \
+          && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null \
+          && sudo apt update \
+          && sudo apt install gh -y
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v3
+        with:
+          path: artifacts
+
+      - name: Generate release tag
+        id: tag
+        run: |
+          # Extract version from git tag if available, otherwise from VERSION file
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            VERSION=${GITHUB_REF#refs/tags/}
+          else
+            VERSION=$(cat VERSION 2>/dev/null || echo "v0.1.0")
+          fi
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "date=$(date +'%Y-%m-%d')" >> $GITHUB_OUTPUT
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p release
+          cp artifacts/exchange-connector-linux-amd64/exchange-connector-linux-amd64 release/
+          cp artifacts/exchange-connector-linux-arm64/exchange-connector-linux-arm64 release/
+          cp artifacts/exchange-connector-darwin-amd64/exchange-connector-darwin-amd64 release/
+          cp artifacts/exchange-connector-darwin-arm64/exchange-connector-darwin-arm64 release/
+          
+          # Create release notes
+          echo "# Exchange Connector Release ${{ steps.tag.outputs.version }}" > release_notes.md
+          echo "Released on ${{ steps.tag.outputs.date }}" >> release_notes.md
+          echo "" >> release_notes.md
+          echo "## Included builds" >> release_notes.md
+          echo "- Linux (AMD64)" >> release_notes.md
+          echo "- Linux (ARM64)" >> release_notes.md
+          echo "- macOS (AMD64)" >> release_notes.md
+          echo "- macOS (ARM64/Apple Silicon)" >> release_notes.md
+          
+          # Create release using GitHub CLI, overwriting if it exists
+          gh release create ${{ steps.tag.outputs.version }} \
+            --title "Exchange Connector ${{ steps.tag.outputs.version }}" \
+            --notes-file release_notes.md \
+            release/exchange-connector-linux-amd64 \
+            release/exchange-connector-linux-arm64 \
+            release/exchange-connector-darwin-amd64 \
+            release/exchange-connector-darwin-arm64 || \
+          gh release edit ${{ steps.tag.outputs.version }} \
+            --title "Exchange Connector ${{ steps.tag.outputs.version }}" \
+            --notes-file release_notes.md 
