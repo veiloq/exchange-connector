@@ -260,7 +260,7 @@ func TestConnectorReconnection(t *testing.T) {
 	config := Config{
 		URL:               wsURL,
 		HeartbeatInterval: time.Second,
-		ReconnectInterval: time.Millisecond * 100, // Fast reconnect for testing
+		ReconnectInterval: time.Millisecond * 50, // Faster reconnect for testing
 		MaxRetries:        3,
 	}
 	connector := NewConnector(config)
@@ -274,7 +274,14 @@ func TestConnectorReconnection(t *testing.T) {
 	err = connector.Subscribe("test", func(message []byte) {})
 	require.NoError(t, err)
 
-	// Send multiple messages to trigger disconnect and reconnect
+	// Ensure we're connected at first
+	assert.True(t, connector.IsConnected())
+
+	// Send message to trigger disconnect in mock server
+	err = connector.Send([]byte(`{"topic":"test","data":"trigger disconnect"}`))
+	require.NoError(t, err)
+
+	// Send multiple messages to ensure the disconnect happens
 	for i := 0; i < 5; i++ {
 		err = connector.Send([]byte(fmt.Sprintf(`{"topic":"test","seq":%d}`, i)))
 		if err != nil {
@@ -284,8 +291,27 @@ func TestConnectorReconnection(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 
-	// Wait for reconnection
-	time.Sleep(500 * time.Millisecond)
+	// Wait for reconnection with timeout
+	reconnected := make(chan bool, 1)
+	go func() {
+		for {
+			connectMu.Lock()
+			count := connectCount
+			connectMu.Unlock()
+			if count > 1 {
+				reconnected <- true
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}()
+
+	select {
+	case <-reconnected:
+		// Reconnection successful, continue test
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for reconnection")
+	}
 
 	// Verify we reconnected
 	connectMu.Lock()
