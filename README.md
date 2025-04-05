@@ -2,19 +2,7 @@
 
 A robust, production-ready Go library for connecting to cryptocurrency exchanges. The library provides a unified interface for interacting with multiple exchanges, supporting both REST API and WebSocket connections.
 
-## Features
-
-- 🔄 Unified interface for multiple exchanges
-- 📊 Real-time market data streaming
-- 🔒 Thread-safe operations
-- 🔁 Automatic reconnection and recovery
-- ⚡ Rate limiting and backoff strategies
-- 📝 Comprehensive logging
-- ✅ Extensive test coverage
-- 🔄 CI/CD with GitHub Actions
-- 🚨 Standardized error handling
-
-## Simple Examples
+## Usage Examples
 
 ### Example 1: Basic Exchange Connection and Data Retrieval
 

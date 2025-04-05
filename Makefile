@@ -389,7 +389,6 @@ help:
 	@echo "  test             - Run all tests in the project"
 	@echo "  test-race        - Run tests with race condition detection"
 	@echo "  test-cover       - Run tests with coverage reporting"
-	@echo "  e2e-test         - Run end-to-end tests"
 	@echo "  lint             - Run linter to check code quality"
 	@echo "  fmt              - Format Go code according to standard style"
 	@echo "  deps             - Download and tidy dependencies"
