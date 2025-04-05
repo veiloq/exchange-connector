@@ -47,6 +47,22 @@ import (
 	"github.com/veiloq/exchange-connector/pkg/logging"
 )
 
+// Constants for connector configuration
+const (
+	// DefaultWorkerPoolSize is the default number of workers for processing incoming messages
+	DefaultWorkerPoolSize = 10
+
+	// DefaultMessageQueueSize is the buffer size for the message queue
+	DefaultMessageQueueSize = 1000
+)
+
+// MessageTask represents a message processing task
+type MessageTask struct {
+	topic   string
+	data    []byte
+	handler MessageHandler
+}
+
 // MessageHandler is a callback function type for handling incoming WebSocket messages.
 // Implementations of this function will be called whenever a message is received for
 // a specific topic that the handler is subscribed to.
@@ -171,6 +187,9 @@ type Metrics struct {
 	// ConnectedTime is when the current connection was established
 	ConnectedTime time.Time
 
+	// LastMessageTime is when the last message was received
+	LastMessageTime time.Time
+
 	// MessageCount is the total number of messages received
 	MessageCount int64
 
@@ -208,6 +227,10 @@ type connector struct {
 
 	// Logger
 	logger logging.Logger
+
+	// Message processing worker pool
+	workerPoolSize int
+	messageQueue   chan MessageTask
 }
 
 // NewConnector creates a new WebSocket connector with the given configuration.
@@ -246,9 +269,11 @@ func NewConnector(config Config) WSConnector {
 	}
 
 	return &connector{
-		config:   config,
-		handlers: make(map[string]MessageHandler),
-		logger:   logging.NewLogger(),
+		config:         config,
+		handlers:       make(map[string]MessageHandler),
+		logger:         logging.NewLogger(),
+		workerPoolSize: DefaultWorkerPoolSize,
+		messageQueue:   make(chan MessageTask, DefaultMessageQueueSize),
 	}
 }
 
@@ -280,8 +305,16 @@ func (c *connector) HealthCheck() error {
 	}
 
 	c.metricsMu.RLock()
-	lastMessage := time.Since(c.metrics.ConnectedTime)
+	lastMessage := time.Since(c.metrics.LastMessageTime)
 	c.metricsMu.RUnlock()
+
+	// If LastMessageTime is zero, check against ConnectedTime instead
+	// This handles the case when no messages have been received yet
+	if lastMessage == time.Since(time.Time{}) {
+		c.metricsMu.RLock()
+		lastMessage = time.Since(c.metrics.ConnectedTime)
+		c.metricsMu.RUnlock()
+	}
 
 	if lastMessage > c.config.HeartbeatInterval*3 {
 		return fmt.Errorf("no messages received in %v", lastMessage)
@@ -305,16 +338,32 @@ func (c *connector) HealthCheck() error {
 // registered topics and starts all necessary background goroutines.
 func (c *connector) Connect(ctx context.Context) error {
 	c.reconnectMu.Lock()
-	defer c.reconnectMu.Unlock()
 
+	// Return immediately if already connected
 	if c.connected {
+		c.reconnectMu.Unlock()
 		return nil
 	}
 
 	// Check if context is already cancelled
 	if ctx.Err() != nil {
+		c.reconnectMu.Unlock()
 		return fmt.Errorf("context already cancelled: %w", ctx.Err())
 	}
+
+	// Set reconnecting state while holding the lock
+	wasReconnecting := c.reconnecting
+	c.reconnecting = true
+	c.reconnectMu.Unlock()
+
+	// When we're done, reset reconnecting state if we set it
+	defer func() {
+		if !wasReconnecting {
+			c.reconnectMu.Lock()
+			c.reconnecting = false
+			c.reconnectMu.Unlock()
+		}
+	}()
 
 	c.logger.Debug("attempting websocket connection",
 		logging.String("url", c.config.URL),
@@ -327,7 +376,8 @@ func (c *connector) Connect(ctx context.Context) error {
 
 	for {
 		attempt++
-		if attempt > c.config.MaxRetries {
+		// Fix: Check for MaxRetries correctly - if MaxRetries is 0, retry indefinitely
+		if c.config.MaxRetries > 0 && attempt > c.config.MaxRetries {
 			return fmt.Errorf("max retries exceeded: %w", lastErr)
 		}
 
@@ -357,32 +407,57 @@ func (c *connector) Connect(ctx context.Context) error {
 			}
 		}
 
+		// We have a successful connection at this point
+		// Acquire lock for the critical section where we update connection state
+		c.reconnectMu.Lock()
 		c.conn = conn
 		c.connected = true
+		c.reconnectMu.Unlock()
+
 		c.metricsMu.Lock()
 		c.metrics.ConnectedTime = time.Now()
+		c.metrics.LastMessageTime = time.Now()
 		c.metrics.ReconnectCount++
 		c.metricsMu.Unlock()
 
 		c.doneMu.Lock()
-		c.done = make(chan struct{})
-		c.closed = false
+		// Create a new done channel if it's nil or if we're closed
+		if c.done == nil || c.closed {
+			c.done = make(chan struct{})
+			c.closed = false
+		}
+		// Capture the done channel for use in goroutines
+		doneChan := c.done
 		c.doneMu.Unlock()
 
-		// Start background routines
-		go c.readPump(ctx)
-		go c.heartbeat()
+		// Start message queue and worker pool
+		c.messageQueue = make(chan MessageTask, DefaultMessageQueueSize)
+		for i := 0; i < c.workerPoolSize; i++ {
+			go c.messageWorker(doneChan)
+		}
+
+		// Start background routines - these must be started before releasing lock
+		// to ensure proper synchronization
+		readPumpCtx := ctx
+		heartbeatDone := doneChan
+
+		// Launch goroutines after setup is complete but with connection state protected
+		go c.readPump(readPumpCtx)
+		go func() {
+			// Using a separate function to capture the current values
+			c.heartbeatLoop(heartbeatDone)
+		}()
 
 		// Monitor context cancellation
-		go func() {
+		go func(ctxToMonitor context.Context, doneToMonitor chan struct{}) {
 			select {
-			case <-ctx.Done():
+			case <-ctxToMonitor.Done():
 				c.logger.Info("context cancelled, closing connection")
 				c.Close()
-			case <-c.done:
+			case <-doneToMonitor:
 				return
 			}
-		}()
+		}(ctx, doneChan)
 
 		c.logger.Info("websocket connected successfully")
 
@@ -407,11 +482,20 @@ func (c *connector) Connect(ctx context.Context) error {
 // reconnection logic if appropriate.
 func (c *connector) readPump(ctx context.Context) {
 	defer func() {
+		// Mark the connection as disconnected
+		c.reconnectMu.Lock()
+		wasConnected := c.connected
 		c.connected = false
-		if c.conn != nil {
-			_ = c.conn.Close()
+		connCopy := c.conn
+		c.conn = nil // Clear the connection reference under lock
+		c.reconnectMu.Unlock()
+
+		// Close the connection safely
+		if connCopy != nil {
+			_ = connCopy.Close()
 		}
 
+		// Signal that readPump has stopped by closing done channel
 		c.doneMu.Lock()
 		if !c.closed {
 			close(c.done)
@@ -421,18 +505,37 @@ func (c *connector) readPump(ctx context.Context) {
 
 		c.logger.Info("readPump stopped")
 
-		// Only attempt reconnection if not explicitly closed and context is not cancelled
-		if !c.reconnecting && ctx.Err() == nil {
+		// Only attempt reconnection if:
+		// 1. We were previously connected (not just closing naturally)
+		// 2. Context is not cancelled
+		if ctx.Err() == nil && wasConnected {
+			// Always try to reconnect when the connection drops unexpectedly
+			// regardless of reconnecting state flag
 			go c.reconnect()
 		}
 	}()
 
-	c.conn.SetReadDeadline(time.Now().Add(c.config.HeartbeatInterval * 3))
+	// Setup read handlers with deadlines
+	c.reconnectMu.Lock()
+	if c.conn == nil {
+		c.reconnectMu.Unlock()
+		return
+	}
 
-	c.conn.SetPongHandler(func(string) error {
-		c.conn.SetReadDeadline(time.Now().Add(c.config.HeartbeatInterval * 3))
+	// Make a copy of the connection for use in this goroutine
+	connCopy := c.conn
+
+	// Setup pong handler
+	connCopy.SetReadDeadline(time.Now().Add(c.config.HeartbeatInterval * 3))
+	connCopy.SetPongHandler(func(string) error {
+		c.reconnectMu.Lock()
+		if c.conn != nil {
+			c.conn.SetReadDeadline(time.Now().Add(c.config.HeartbeatInterval * 3))
+		}
+		c.reconnectMu.Unlock()
 		return nil
 	})
+	c.reconnectMu.Unlock()
 
 	for {
 		select {
@@ -440,8 +543,18 @@ func (c *connector) readPump(ctx context.Context) {
 			c.logger.Info("context cancelled, closing readPump")
 			return
 		default:
+			// Check if connection is still valid
+			c.reconnectMu.Lock()
+			if c.conn == nil || !c.connected {
+				c.reconnectMu.Unlock()
+				return
+			}
+			// Reset read deadline and make a copy of connection
 			c.conn.SetReadDeadline(time.Now().Add(c.config.HeartbeatInterval * 3))
-			_, message, err := c.conn.ReadMessage()
+			connCopy = c.conn
+			c.reconnectMu.Unlock()
+
+			_, message, err := connCopy.ReadMessage()
 			if err != nil {
 				if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
 					c.logger.Warn("read error", logging.Error(err))
@@ -454,6 +567,7 @@ func (c *connector) readPump(ctx context.Context) {
 
 			c.metricsMu.Lock()
 			c.metrics.MessageCount++
+			c.metrics.LastMessageTime = time.Now()
 			c.metricsMu.Unlock()
 
 			c.processMessage(message)
@@ -472,6 +586,11 @@ func (c *connector) readPump(ctx context.Context) {
 // timeout protection and panic recovery to ensure message handling failures don't
 // affect the main connection.
 func (c *connector) processMessage(message []byte) {
+	// Update last message time
+	c.metricsMu.Lock()
+	c.metrics.LastMessageTime = time.Now()
+	c.metricsMu.Unlock()
+
 	// Parse message to determine topic
 	var msg struct {
 		Topic string `json:"topic"`
@@ -481,50 +600,32 @@ func (c *connector) processMessage(message []byte) {
 		return
 	}
 
-	// Call registered handler for the topic
+	// Call registered handler for the topic using the worker pool
 	c.handlersMu.RLock()
 	handler, exists := c.handlers[msg.Topic]
 	c.handlersMu.RUnlock()
 
 	if exists {
-		go func(topic string, data []byte, h MessageHandler) {
-			defer func() {
-				if r := recover(); r != nil {
-					c.logger.Error("handler panic recovered",
-						logging.String("topic", topic),
-						logging.String("panic", fmt.Sprintf("%v", r)),
-					)
-				}
-			}()
-
-			// Create a timeout context for the handler
-			handlerCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-
-			done := make(chan struct{})
-			go func() {
-				h(data)
-				close(done)
-			}()
-
-			select {
-			case <-done:
-				// Handler completed successfully
-			case <-handlerCtx.Done():
-				c.logger.Warn("handler timeout", logging.String("topic", topic))
-			}
-		}(msg.Topic, message, handler)
+		select {
+		case c.messageQueue <- MessageTask{
+			topic:   msg.Topic,
+			data:    message,
+			handler: handler,
+		}:
+			// Successfully queued task
+		default:
+			c.logger.Warn("message queue full, dropping message",
+				logging.String("topic", msg.Topic))
+			c.metricsMu.Lock()
+			c.metrics.ErrorCount++
+			c.metricsMu.Unlock()
+		}
 	}
 }
 
-// heartbeat sends periodic ping messages to keep the WebSocket connection alive.
-// It uses a ticker based on the configured heartbeat interval.
-//
-// This internal method runs in its own goroutine and terminates when the
-// connection is closed. It's essential for maintaining long-lived WebSocket
-// connections that might otherwise be closed by proxies or load balancers
-// after periods of inactivity.
-func (c *connector) heartbeat() {
+// heartbeatLoop is an extracted helper function that runs the heartbeat logic
+// This helps avoid race conditions by capturing the done channel at creation time
+func (c *connector) heartbeatLoop(done chan struct{}) {
 	// Ensure heartbeat interval is positive, default to 20 seconds if not set
 	interval := c.config.HeartbeatInterval
 	if interval <= 0 {
@@ -538,19 +639,53 @@ func (c *connector) heartbeat() {
 		select {
 		case <-ticker.C:
 			c.writeMu.Lock()
-			if !c.connected {
+			c.reconnectMu.Lock()
+			isConnected := c.connected
+			conn := c.conn // Make a copy of the connection
+			c.reconnectMu.Unlock()
+
+			if !isConnected || conn == nil {
 				c.writeMu.Unlock()
 				return
 			}
-			err := c.conn.WriteMessage(websocket.PingMessage, nil)
+
+			err := conn.WriteMessage(websocket.PingMessage, nil)
 			c.writeMu.Unlock()
+
 			if err != nil {
+				c.logger.Warn("heartbeat ping failed", logging.Error(err))
+				c.metricsMu.Lock()
+				c.metrics.ErrorCount++
+				c.metricsMu.Unlock()
+
+				// Don't just return, actively trigger reconnection
+				go func() {
+					// First close the connection to ensure clean state
+					if err := c.Close(); err != nil {
+						c.logger.Warn("failed to close connection after heartbeat failure", logging.Error(err))
+					}
+
+					// Start reconnection directly without checking flags
+					// as we know the connection is broken if heartbeat failed
+					go c.reconnect()
+				}()
 				return
 			}
-		case <-c.done:
+		case <-done:
 			return
 		}
 	}
+}
+
+// heartbeat sends periodic ping messages to keep the WebSocket connection alive.
+// It uses a ticker based on the configured heartbeat interval.
+//
+// This internal method runs in its own goroutine and terminates when the
+// connection is closed. It's essential for maintaining long-lived WebSocket
+// connections that might otherwise be closed by proxies or load balancers
+// after periods of inactivity.
+func (c *connector) heartbeat() {
+	c.heartbeatLoop(c.done)
 }
 
 // reconnect attempts to reestablish the WebSocket connection after a failure.
@@ -560,18 +695,33 @@ func (c *connector) heartbeat() {
 // concurrent reconnection attempts. It updates metrics and logs the
 // reconnection process for observability.
 func (c *connector) reconnect() {
+	// First check if we're already connected - if so, no need to reconnect
 	c.reconnectMu.Lock()
+	if c.connected {
+		c.logger.Info("reconnect called but already connected, skipping")
+		c.reconnectMu.Unlock()
+		return
+	}
+
+	// Check if we're already reconnecting
 	if c.reconnecting {
+		c.logger.Info("reconnect called but already reconnecting, skipping")
 		c.reconnectMu.Unlock()
 		return
 	}
 	c.reconnecting = true
 	c.reconnectMu.Unlock()
 
+	c.logger.Info("reconnect started with settings",
+		logging.String("url", c.config.URL),
+		logging.Duration("reconnectInterval", c.config.ReconnectInterval),
+		logging.Int("maxRetries", c.config.MaxRetries))
+
 	defer func() {
 		c.reconnectMu.Lock()
 		c.reconnecting = false
 		c.reconnectMu.Unlock()
+		c.logger.Info("reconnect finished, reconnecting flag reset")
 	}()
 
 	// Create context with timeout for reconnection
@@ -583,14 +733,44 @@ func (c *connector) reconnect() {
 	c.metrics.ReconnectCount++
 	c.metricsMu.Unlock()
 
+	// Handle unlimited retries when MaxRetries=0
+	attempts := uint(c.config.MaxRetries)
+	if c.config.MaxRetries <= 0 {
+		attempts = 0 // Use 0 to indicate unlimited in retry.Do
+	}
+
+	c.logger.Info("starting reconnection process", logging.Int("attempts", int(attempts)))
+
+	// Use the retry library to attempt reconnection with backoff
 	err := retry.Do(
 		func() error {
+			// Check if context is cancelled
 			if ctx.Err() != nil {
+				c.logger.Warn("reconnection cancelled by context", logging.Error(ctx.Err()))
 				return retry.Unrecoverable(ctx.Err())
 			}
-			return c.Connect(ctx)
+
+			// Check if we're already connected - no need to reconnect
+			c.reconnectMu.Lock()
+			alreadyConnected := c.connected
+			c.reconnectMu.Unlock()
+
+			if alreadyConnected {
+				c.logger.Info("already reconnected, exiting retry loop")
+				return nil
+			}
+
+			c.logger.Info("attempting to connect in reconnect loop")
+			connectErr := c.Connect(ctx)
+			if connectErr != nil {
+				c.logger.Warn("reconnection attempt failed", logging.Error(connectErr))
+				return connectErr
+			}
+
+			c.logger.Info("connection successful in reconnect loop")
+			return nil
 		},
-		retry.Attempts(uint(c.config.MaxRetries)),
+		retry.Attempts(attempts),
 		retry.Delay(c.config.ReconnectInterval),
 		retry.DelayType(retry.BackOffDelay),
 		retry.Context(ctx),
@@ -602,7 +782,7 @@ func (c *connector) reconnect() {
 	)
 
 	if err != nil {
-		c.logger.Error("reconnection failed", logging.Error(err))
+		c.logger.Error("reconnection failed after all attempts", logging.Error(err))
 		c.metricsMu.Lock()
 		c.metrics.ErrorCount++
 		c.metricsMu.Unlock()
@@ -665,16 +845,20 @@ func (c *connector) Unsubscribe(topic string) error {
 // JSON marshaling fails. It accepts either pre-serialized byte arrays or
 // JSON-serializable objects. Thread-safe with mutex protection for concurrent writes.
 func (c *connector) Send(message interface{}) error {
-	if !c.connected {
+	c.reconnectMu.Lock()
+	if !c.connected || c.conn == nil {
+		c.reconnectMu.Unlock()
 		return fmt.Errorf("websocket not connected")
 	}
+	conn := c.conn
+	c.reconnectMu.Unlock()
 
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
 
 	// If message is already []byte, send it directly
 	if data, ok := message.([]byte); ok {
-		return c.conn.WriteMessage(websocket.TextMessage, data)
+		return conn.WriteMessage(websocket.TextMessage, data)
 	}
 
 	// Otherwise, marshal to JSON
@@ -683,7 +867,7 @@ func (c *connector) Send(message interface{}) error {
 		return fmt.Errorf("failed to marshal message: %w", err)
 	}
 
-	return c.conn.WriteMessage(websocket.TextMessage, data)
+	return conn.WriteMessage(websocket.TextMessage, data)
 }
 
 // IsConnected returns the current connection status.
@@ -694,6 +878,8 @@ func (c *connector) Send(message interface{}) error {
 // This method is thread-safe and can be used to check connection status before
 // performing operations that require an active connection.
 func (c *connector) IsConnected() bool {
+	c.reconnectMu.Lock()
+	defer c.reconnectMu.Unlock()
 	return c.connected
 }
 
@@ -721,6 +907,16 @@ func (c *connector) Close() error {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
 
+	c.reconnectMu.Lock()
+	if !c.connected {
+		c.reconnectMu.Unlock()
+		return nil
+	}
+	c.connected = false
+	connCopy := c.conn
+	c.conn = nil // Set to nil under lock to prevent races
+	c.reconnectMu.Unlock()
+
 	c.doneMu.Lock()
 	wasClosed := c.closed
 	if !c.closed {
@@ -733,20 +929,17 @@ func (c *connector) Close() error {
 		return nil // Already closed
 	}
 
-	// Stop all background goroutines
-	c.connected = false
-
 	// Safely close the connection
-	if c.conn != nil {
+	if connCopy != nil {
 		// Try to send close message but don't error if it fails
-		_ = c.conn.WriteMessage(websocket.CloseMessage,
+		_ = connCopy.WriteMessage(websocket.CloseMessage,
 			websocket.FormatCloseMessage(websocket.CloseNormalClosure, "client closed connection"))
 
 		// Give a bit of time for the close message to be sent before closing
 		time.Sleep(100 * time.Millisecond)
 
 		// Close the connection and ignore any "use of closed network connection" errors
-		err := c.conn.Close()
+		err := connCopy.Close()
 		if err != nil && !strings.Contains(err.Error(), "use of closed network connection") {
 			return err
 		}
@@ -787,4 +980,48 @@ func (c *connector) resubscribe() error {
 		return fmt.Errorf("failed to resubscribe to %d topics", len(errs))
 	}
 	return nil
+}
+
+// messageWorker processes tasks from the message queue
+func (c *connector) messageWorker(done chan struct{}) {
+	for {
+		select {
+		case task, ok := <-c.messageQueue:
+			if !ok {
+				return // Channel closed
+			}
+
+			// Process the message with timeout protection
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+
+			func() {
+				defer cancel()
+				defer func() {
+					if r := recover(); r != nil {
+						c.logger.Error("handler panic recovered",
+							logging.String("topic", task.topic),
+							logging.String("panic", fmt.Sprintf("%v", r)),
+						)
+					}
+				}()
+
+				// Execute the handler with timeout protection
+				handlerDone := make(chan struct{}, 1)
+				go func() {
+					task.handler(task.data)
+					handlerDone <- struct{}{}
+				}()
+
+				select {
+				case <-handlerDone:
+					// Handler completed successfully
+				case <-ctx.Done():
+					c.logger.Warn("handler timeout", logging.String("topic", task.topic))
+				}
+			}()
+
+		case <-done:
+			return // Worker shutting down
+		}
+	}
 }
