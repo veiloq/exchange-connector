@@ -1,4 +1,4 @@
-# Cryptocurrency Exchange Connector
+# Exchange Connector
 
 A robust, production-ready Go library for connecting to cryptocurrency exchanges. The library provides a unified interface for interacting with multiple exchanges, supporting both REST API and WebSocket connections.
 
@@ -90,7 +90,6 @@ func main() {
             candle.Open, candle.High, candle.Low, candle.Close, candle.Volume)
     }
 }
-```
 
 ### Example 2: Real-time WebSocket Data Subscription
 
@@ -177,12 +176,204 @@ func main() {
     
     log.Println("Shutdown signal received, closing connection...")
 }
-```
 
-## Installation
+## Installation and Usage
+
+### Installation
+
+Installing the library is straightforward with Go modules:
 
 ```bash
 go get github.com/veiloq/exchange-connector
+```
+
+### Simple Usage Example
+
+```go
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"time"
+
+	"github.com/veiloq/exchange-connector/pkg/exchanges/bybit"
+	"github.com/veiloq/exchange-connector/pkg/exchanges/interfaces"
+)
+
+func main() {
+	// Create a new exchange connector with default options
+	connector := bybit.NewConnector(nil)
+	
+	// Create context with timeout
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	
+	// Connect to the exchange
+	if err := connector.Connect(ctx); err != nil {
+		log.Fatalf("Failed to connect: %v", err)
+	}
+	defer connector.Close()
+	
+	// Fetch BTC/USDT candlestick data for the last hour
+	candles, err := connector.GetCandles(ctx, interfaces.CandleRequest{
+		Symbol:    "BTCUSDT",
+		Interval:  "1m",
+		StartTime: time.Now().Add(-1 * time.Hour),
+		EndTime:   time.Now(),
+		Limit:     60,
+	})
+	
+	if err != nil {
+		log.Fatalf("Failed to get candles: %v", err)
+	}
+	
+	// Display the results
+	fmt.Printf("Retrieved %d candles for BTCUSDT\n", len(candles))
+	for i, candle := range candles[:5] {
+		fmt.Printf("%d. %s | Open: %.2f, Close: %.2f\n",
+			i+1,
+			candle.StartTime.Format("15:04:05"),
+			candle.Open,
+			candle.Close)
+	}
+	fmt.Println("...")
+}
+```
+
+For advanced usage, refer to the detailed examples in the sections below.
+
+## Installation
+
+### Prerequisites
+
+- Go 1.24 or later
+- Git
+- A supported exchange account (e.g., Bybit, Binance)
+
+### Using go get
+
+The simplest way to install the library is using `go get`. Here are the detailed steps:
+
+1. First, ensure you have Go 1.24 or later installed:
+```bash
+go version
+```
+
+2. Install the library:
+```bash
+go get github.com/veiloq/exchange-connector
+```
+
+3. Create a new Go project (if you don't have one):
+```bash
+mkdir my-project
+cd my-project
+go mod init my-project
+```
+
+4. Import the library in your Go code:
+```go
+import "github.com/veiloq/exchange-connector/pkg/exchanges/bybit"
+import "github.com/veiloq/exchange-connector/pkg/exchanges/interfaces"
+```
+
+5. Run `go mod tidy` to ensure all dependencies are properly downloaded:
+```bash
+go mod tidy
+```
+
+6. Verify the installation by running a simple test:
+```go
+package main
+
+import (
+    "context"
+    "log"
+
+    "github.com/veiloq/exchange-connector/pkg/exchanges/bybit"
+)
+
+func main() {
+    connector := bybit.NewConnector(nil)
+    ctx := context.Background()
+    
+    if err := connector.Connect(ctx); err != nil {
+        log.Fatal(err)
+    }
+    defer connector.Close()
+    
+    log.Println("Successfully connected to Bybit!")
+}
+```
+
+7. Run your program:
+```bash
+go run main.go
+```
+
+If you need to update to the latest version:
+```bash
+go get -u github.com/veiloq/exchange-connector
+```
+
+For a specific version:
+```bash
+go get github.com/veiloq/exchange-connector@v0.1.0
+```
+
+### Using go.mod
+
+If you're using Go modules in your project, add the following to your `go.mod` file:
+
+```go
+require github.com/veiloq/exchange-connector v0.1.0
+```
+
+Then run:
+
+```bash
+go mod tidy
+```
+
+### Development Setup
+
+For development or if you want to contribute:
+
+1. Clone the repository:
+```bash
+git clone https://github.com/veiloq/exchange-connector.git
+cd exchange-connector
+```
+
+2. Install dependencies:
+```bash
+go mod download
+```
+
+3. Run tests to verify the installation:
+```bash
+make test
+```
+
+4. For end-to-end tests (requires exchange API credentials):
+```bash
+make e2e-test
+```
+
+### Environment Setup
+
+Before using the library, you'll need to set up your exchange API credentials. The recommended way is to use environment variables:
+
+```bash
+# For Bybit
+export BYBIT_API_KEY="your-api-key"
+export BYBIT_API_SECRET="your-api-secret"
+
+# For Binance (coming soon)
+export BINANCE_API_KEY="your-api-key"
+export BINANCE_API_SECRET="your-api-secret"
 ```
 
 ## Quick Start
@@ -236,7 +427,6 @@ func main() {
     // Keep the program running
     select {}
 }
-```
 
 ## Supported Exchanges
 
@@ -369,7 +559,7 @@ logger.Info("connecting to exchange",
 
 ### Prerequisites
 
-- Go 1.21 or higher
+- Go 1.24 or higher
 - Make
 - golangci-lint
 - GitHub CLI (gh) for release management
