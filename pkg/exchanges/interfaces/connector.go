@@ -257,6 +257,19 @@ type ExchangeOptions struct {
 	LogLevel string
 }
 
+// WithCredentials sets the API key and secret on the ExchangeOptions and returns the updated options.
+// This provides a convenient way to set authentication credentials with method chaining.
+//
+// Example usage:
+//
+//	options := interfaces.NewExchangeOptions().WithCredentials("your-api-key", "your-api-secret")
+//	connector := bybit.NewConnector(options)
+func (o *ExchangeOptions) WithCredentials(apiKey, apiSecret string) *ExchangeOptions {
+	o.APIKey = apiKey
+	o.APISecret = apiSecret
+	return o
+}
+
 // Candle represents OHLCV (Open, High, Low, Close, Volume) market data for a specific time period.
 // Each candle represents a discrete time interval in a price chart.
 type Candle struct {

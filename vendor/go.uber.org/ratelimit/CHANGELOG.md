@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](http://semver.org/spec/v2.0.0.
 ## Unreleased
 -  No changes yet.
 
-## v0.3.1 - 2024-03-04
+## v0.3.1 - 2025-03-04
 ### Fixed
 - Fixed a bug related to maxSlack boundary detection. #124
   Thanks to @smallnest for reporting and @storozhukBM for fixing.

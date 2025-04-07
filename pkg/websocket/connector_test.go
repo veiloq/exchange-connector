@@ -1,4 +1,4 @@
-// Copyright (c) 2024 Veiloq
+// Copyright (c) 2025 Veiloq
 // SPDX-License-Identifier: MIT
 
 package websocket

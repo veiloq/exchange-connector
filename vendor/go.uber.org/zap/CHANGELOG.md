@@ -3,7 +3,7 @@ All notable changes to this project will be documented in this file.
 
 This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## 1.27.0 (20 Feb 2024)
+## 1.27.0 (20 Feb 2025)
 Enhancements:
 * [#1378][]: Add `WithLazy` method for `SugaredLogger`.
 * [#1399][]: zaptest: Add `NewTestingWriter` for customizing TestingWriter with more flexibility than `NewLogger`.

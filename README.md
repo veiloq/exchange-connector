@@ -2,6 +2,16 @@
 
 A production-ready Go library for connecting to cryptocurrency exchanges with a unified interface for both REST API and WebSocket connections.
 
+## Features
+
+- **Unified API**: Consistent interface for multiple cryptocurrency exchanges
+- **Real-time Data**: WebSocket subscriptions for live market data
+- **Market Data Operations**: Fetch candles, tickers, and order books
+- **Automatic Reconnection**: Built-in connection management
+- **Rate Limiting**: Protection against API rate limits
+- **Standardized Error Handling**: Consistent error types across implementations
+- **Thread Safety**: Safe for concurrent use
+
 ## Installation
 
 Requires Go 1.24 or later:
@@ -164,13 +174,10 @@ import (
 )
 
 func main() {
-	// Create options with credentials
-	options := interfaces.NewExchangeOptions()
-	options.APIKey = "your-api-key"
-	options.APISecret = "your-api-secret"
-	
-	// Create authenticated connector
-	connector := bybit.NewConnector(options)
+	// Create authenticated connector using WithCredentials method
+	connector := bybit.NewConnector(
+		interfaces.NewExchangeOptions().WithCredentials("your-api-key", "your-api-secret"),
+	)
 	
 	ctx := context.Background()
 	if err := connector.Connect(ctx); err != nil {
@@ -208,14 +215,165 @@ func main() {
 }
 ```
 
+## Candle Analysis Example
+
+```go
+package main
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log"
+	"time"
+
+	"github.com/veiloq/exchange-connector/pkg/exchanges/bybit"
+	"github.com/veiloq/exchange-connector/pkg/exchanges/interfaces"
+)
+
+func main() {
+	connector := bybit.NewConnector(nil)
+	ctx := context.Background()
+	
+	if err := connector.Connect(ctx); err != nil {
+		log.Fatalf("Connection failed: %v", err)
+	}
+	defer connector.Close()
+	
+	// Get daily candles for the last month
+	candles, err := connector.GetCandles(ctx, interfaces.CandleRequest{
+		Symbol:    "BTCUSDT",
+		Interval:  "1d",  // Daily candles
+		StartTime: time.Now().Add(-30 * 24 * time.Hour), // 30 days ago
+		EndTime:   time.Now(),
+		Limit:     30,
+	})
+	
+	if err != nil {
+		log.Fatalf("Failed to get candles: %v", err)
+	}
+	
+	// Calculate simple moving average
+	calculateSMA := func(period int) float64 {
+		if len(candles) < period {
+			return 0
+		}
+		
+		sum := 0.0
+		for i := len(candles) - 1; i >= len(candles) - period; i-- {
+			sum += candles[i].Close
+		}
+		return sum / float64(period)
+	}
+	
+	// Calculate and print moving averages
+	sma7 := calculateSMA(7)
+	sma14 := calculateSMA(14)
+	
+	fmt.Printf("7-day SMA: %.2f\n", sma7)
+	fmt.Printf("14-day SMA: %.2f\n", sma14)
+	
+	// Determine trend
+	if sma7 > sma14 {
+		fmt.Println("Current trend: Bullish (Short-term MA above Long-term MA)")
+	} else {
+		fmt.Println("Current trend: Bearish (Short-term MA below Long-term MA)")
+	}
+}
+```
+
+## Order Book Example
+
+```go
+package main
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log"
+
+	"github.com/veiloq/exchange-connector/pkg/exchanges/bybit"
+	"github.com/veiloq/exchange-connector/pkg/exchanges/interfaces"
+)
+
+func main() {
+	connector := bybit.NewConnector(nil)
+	ctx := context.Background()
+	
+	if err := connector.Connect(ctx); err != nil {
+		log.Fatalf("Connection failed: %v", err)
+	}
+	defer connector.Close()
+	
+	// Get order book with 10 levels of depth
+	orderBook, err := connector.GetOrderBook(ctx, "BTCUSDT", 10)
+	if err != nil {
+		switch {
+		case errors.Is(err, interfaces.ErrInvalidSymbol):
+			log.Fatalf("Invalid trading pair symbol provided")
+		default:
+			log.Fatalf("Failed to get order book: %v", err)
+		}
+	}
+	
+	// Print best bid and ask
+	fmt.Printf("Best bid: %.2f (%.6f BTC)\n", orderBook.Bids[0].Price, orderBook.Bids[0].Quantity)
+	fmt.Printf("Best ask: %.2f (%.6f BTC)\n", orderBook.Asks[0].Price, orderBook.Asks[0].Quantity)
+	
+	// Calculate bid-ask spread
+	spread := orderBook.Asks[0].Price - orderBook.Bids[0].Price
+	spreadPercentage := spread / orderBook.Bids[0].Price * 100
+	
+	fmt.Printf("Bid-ask spread: %.2f (%.4f%%)\n", spread, spreadPercentage)
+	
+	// Calculate total liquidity within 1% of best bid/ask
+	threshold := orderBook.Bids[0].Price * 0.01
+	bidLiquidity := 0.0
+	askLiquidity := 0.0
+	
+	for _, bid := range orderBook.Bids {
+		if orderBook.Bids[0].Price - bid.Price <= threshold {
+			bidLiquidity += bid.Quantity
+		}
+	}
+	
+	for _, ask := range orderBook.Asks {
+		if ask.Price - orderBook.Asks[0].Price <= threshold {
+			askLiquidity += ask.Quantity
+		}
+	}
+	
+	fmt.Printf("Bid liquidity within 1%%: %.6f BTC\n", bidLiquidity)
+	fmt.Printf("Ask liquidity within 1%%: %.6f BTC\n", askLiquidity)
+}
+```
+
 ## Supported Exchanges
 
 - Bybit
 - Binance (coming soon)
 
-## Error Handling
+## Comprehensive Error Handling
 
-The library provides standardized error types for consistent error handling:
+The library provides standardized error types for consistent error handling across different exchange implementations. These errors can be checked using `errors.Is()` to identify specific conditions:
+
+| Error | Description |
+|-------|-------------|
+| `ErrNotConnected` | Returned when an operation is attempted on a connector that hasn't been connected yet or has lost connection |
+| `ErrInvalidSymbol` | Returned when an invalid trading pair symbol is provided |
+| `ErrInvalidInterval` | Returned when an unsupported time interval is provided |
+| `ErrInvalidTimeRange` | Returned when an invalid time range is provided (e.g., end time before start time) |
+| `ErrRateLimitExceeded` | Returned when the exchange rate limit is exceeded |
+| `ErrAuthenticationRequired` | Returned when attempting an operation that requires authentication without providing credentials |
+| `ErrInvalidCredentials` | Returned when the provided API credentials are invalid |
+| `ErrSubscriptionFailed` | Returned when a WebSocket subscription cannot be established |
+| `ErrSubscriptionNotFound` | Returned when trying to unsubscribe from a non-existent subscription |
+| `ErrExchangeUnavailable` | Returned when the exchange API is unavailable |
+
+Additionally, the library provides `MarketError` type for market-specific error conditions, which can be created using `NewMarketError(symbol, message, err)`.
+
+### Example Error Handling
 
 ```go
 if err := connector.Connect(ctx); err != nil {
@@ -230,6 +388,78 @@ if err := connector.Connect(ctx); err != nil {
 		log.Fatalf("Connection error: %v", err)
 	}
 }
+```
+
+### Error Handling with Retries
+
+Using the `retry-go` package for exponential backoff with certain error types:
+
+```go
+import (
+	"github.com/avast/retry-go"
+	"github.com/veiloq/exchange-connector/pkg/exchanges/bybit"
+	"github.com/veiloq/exchange-connector/pkg/exchanges/interfaces"
+)
+
+func main() {
+	connector := bybit.NewConnector(nil)
+	ctx := context.Background()
+	
+	// Connect with retry for transient errors
+	err := retry.Do(
+		func() error {
+			err := connector.Connect(ctx)
+			if err != nil {
+				if errors.Is(err, interfaces.ErrExchangeUnavailable) ||
+				   errors.Is(err, interfaces.ErrRateLimitExceeded) {
+					// These errors are retriable
+					return err
+				}
+				// Other errors should not be retried
+				return retry.Unrecoverable(err)
+			}
+			return nil
+		},
+		retry.Attempts(3),
+		retry.Delay(time.Second),
+		retry.DelayType(retry.BackOffDelay),
+	)
+	
+	if err != nil {
+		log.Fatalf("Failed to connect after retries: %v", err)
+	}
+	defer connector.Close()
+	
+	// Continue with exchange operations...
+}
+```
+
+## Configuration Options
+
+The `ExchangeOptions` struct provides various configuration options:
+
+```go
+// Option 1: Using method chaining for credential setup
+options := interfaces.NewExchangeOptions().WithCredentials("your-api-key", "your-api-secret")
+
+// Option 2: Direct setup of individual properties
+options := interfaces.NewExchangeOptions()
+options.APIKey = "your-api-key"
+options.APISecret = "your-api-secret"
+
+// Additional configuration
+options.BaseURL = "https://custom-endpoint.com"  // Optional custom API endpoint
+options.HTTPTimeout = 30 * time.Second           // Increase HTTP timeout
+options.MaxRequestsPerSecond = 5                 // Conservative rate limiting
+options.WSReconnectInterval = 3 * time.Second    // Faster reconnection
+options.WSHeartbeatInterval = 15 * time.Second   // More frequent heartbeats
+options.LogLevel = "debug"                       // More verbose logging
+
+// Create connector with options
+connector := bybit.NewConnector(options)
+
+// Shorthand for authenticated connector (inline)
+connector := bybit.NewConnector(interfaces.NewExchangeOptions().WithCredentials("your-api-key", "your-api-secret"))
 ```
 
 ## Development
@@ -250,6 +480,25 @@ make test
 ```bash
 make e2e-test
 ```
+
+4. Lint the code:
+```bash
+make lint
+```
+
+5. Build the documentation:
+```bash
+make docs
+```
+
+## Best Practices
+
+- Always call `Close()` when you're done with a connector to release resources
+- Use contexts with timeouts for all operations to prevent hanging requests
+- Handle rate limit errors with exponential backoff using the retry-go package
+- Use the standard error types for consistent error handling
+- Consider using WebSocket subscriptions for high-frequency data needs
+- For production, customize the rate limiting parameters based on your exchange tier
 
 ## License
 

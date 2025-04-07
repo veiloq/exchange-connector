@@ -2,7 +2,9 @@ package bybit
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/veiloq/exchange-connector/pkg/exchanges/interfaces"
@@ -643,20 +645,22 @@ func (c *Connector) SubscribeOrderBook(ctx context.Context, symbols []string, ha
 			logging.String("symbol", symbol),
 			logging.String("topic", topic))
 
+		// Create a closure with the symbol value to use in the callback
+		symbolCopy := symbol // Create a copy to prevent issues with loop variable capture
+
 		if err := c.ws.Subscribe(topic, func(message []byte) {
-			// TODO: Implement actual message parsing from Bybit format
-			// For now, just send a mock order book
-			handler(interfaces.OrderBook{
-				Symbol: symbol,
-				Bids: []interfaces.OrderBookLevel{
-					{Price: 49900, Quantity: 1.0},
-					{Price: 49800, Quantity: 2.0},
-				},
-				Asks: []interfaces.OrderBookLevel{
-					{Price: 50100, Quantity: 1.0},
-					{Price: 50200, Quantity: 2.0},
-				},
-			})
+			// Parse the Bybit order book message
+			orderBook, err := c.parseOrderBookMessage(message, symbolCopy)
+			if err != nil {
+				c.logger.Error("failed to parse order book message",
+					logging.String("symbol", symbolCopy),
+					logging.Error(err),
+					logging.String("raw_message", string(message)))
+				return
+			}
+
+			// Call the handler with the parsed order book
+			handler(*orderBook)
 		}); err != nil {
 			c.logger.Error("failed to subscribe to order book updates",
 				logging.String("symbol", symbol),
@@ -666,6 +670,137 @@ func (c *Connector) SubscribeOrderBook(ctx context.Context, symbols []string, ha
 	}
 
 	return nil
+}
+
+// parseOrderBookMessage parses a Bybit WebSocket message into an OrderBook structure
+// Format based on Bybit API documentation
+func (c *Connector) parseOrderBookMessage(message []byte, symbol string) (*interfaces.OrderBook, error) {
+	if len(message) == 0 {
+		return nil, fmt.Errorf("empty message received")
+	}
+
+	type OrderLevel struct {
+		Price    string `json:"p"`
+		Quantity string `json:"s"`
+	}
+
+	type OrderBookData struct {
+		Symbol string       `json:"s"`
+		Bids   []OrderLevel `json:"b"`
+		Asks   []OrderLevel `json:"a"`
+		Time   int64        `json:"t,omitempty"` // Timestamp field might be present
+	}
+
+	type OrderBookResponse struct {
+		Topic     string        `json:"topic"`
+		Type      string        `json:"type"`
+		Data      OrderBookData `json:"data"`
+		TimeStamp int64         `json:"ts"`
+	}
+
+	var response OrderBookResponse
+	if err := json.Unmarshal(message, &response); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal order book message: %w", err)
+	}
+
+	// Validate response fields
+	if response.Type == "" {
+		return nil, fmt.Errorf("missing message type in response")
+	}
+
+	// Validate the topic matches our expected format
+	expectedTopic := fmt.Sprintf("orderbook.%s", symbol)
+	if response.Topic != expectedTopic {
+		return nil, fmt.Errorf("topic mismatch: expected %s, got %s", expectedTopic, response.Topic)
+	}
+
+	// Validate the symbol matches
+	if response.Data.Symbol != symbol {
+		return nil, fmt.Errorf("symbol mismatch: expected %s, got %s", symbol, response.Data.Symbol)
+	}
+
+	// Early validation for empty data
+	if len(response.Data.Bids) == 0 && len(response.Data.Asks) == 0 {
+		c.logger.Warn("received empty order book data",
+			logging.String("symbol", symbol),
+			logging.Int("timestamp", int(response.TimeStamp)))
+		return &interfaces.OrderBook{
+			Symbol: symbol,
+			Bids:   []interfaces.OrderBookLevel{},
+			Asks:   []interfaces.OrderBookLevel{},
+		}, nil
+	}
+
+	// Convert string prices and quantities to float64
+	bids := make([]interfaces.OrderBookLevel, 0, len(response.Data.Bids))
+	for _, bid := range response.Data.Bids {
+		price, err := strconv.ParseFloat(bid.Price, 64)
+		if err != nil {
+			c.logger.Warn("failed to parse bid price",
+				logging.String("price", bid.Price),
+				logging.String("symbol", symbol),
+				logging.Error(err))
+			continue
+		}
+
+		quantity, err := strconv.ParseFloat(bid.Quantity, 64)
+		if err != nil {
+			c.logger.Warn("failed to parse bid quantity",
+				logging.String("quantity", bid.Quantity),
+				logging.String("symbol", symbol),
+				logging.Error(err))
+			continue
+		}
+
+		// Skip zero quantity levels (might indicate removed levels)
+		if quantity <= 0 {
+			continue
+		}
+
+		bids = append(bids, interfaces.OrderBookLevel{
+			Price:    price,
+			Quantity: quantity,
+		})
+	}
+
+	asks := make([]interfaces.OrderBookLevel, 0, len(response.Data.Asks))
+	for _, ask := range response.Data.Asks {
+		price, err := strconv.ParseFloat(ask.Price, 64)
+		if err != nil {
+			c.logger.Warn("failed to parse ask price",
+				logging.String("price", ask.Price),
+				logging.String("symbol", symbol),
+				logging.Error(err))
+			continue
+		}
+
+		quantity, err := strconv.ParseFloat(ask.Quantity, 64)
+		if err != nil {
+			c.logger.Warn("failed to parse ask quantity",
+				logging.String("quantity", ask.Quantity),
+				logging.String("symbol", symbol),
+				logging.Error(err))
+			continue
+		}
+
+		// Skip zero quantity levels (might indicate removed levels)
+		if quantity <= 0 {
+			continue
+		}
+
+		asks = append(asks, interfaces.OrderBookLevel{
+			Price:    price,
+			Quantity: quantity,
+		})
+	}
+
+	// If all bids or asks were skipped due to parsing errors,
+	// we should still return what we have instead of nothing
+	return &interfaces.OrderBook{
+		Symbol: symbol,
+		Bids:   bids,
+		Asks:   asks,
+	}, nil
 }
 
 // Unsubscribe terminates an active WebSocket subscription.
