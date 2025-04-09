@@ -14,7 +14,7 @@ BINARY_NAME=exchange-connector
 
 # Build parameters
 BUILD_DIR=build
-MAIN_PACKAGE=./cmd/examples
+MAIN_PACKAGE=./pkg
 VERSION=$(shell cat VERSION 2>/dev/null || echo "v0.1.0")
 
 # TARGET: all
