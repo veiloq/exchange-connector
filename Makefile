@@ -1,7 +1,7 @@
 # Include .env file if it exists
 -include .env
 
-.PHONY: all build test test-race test-cover lint fmt clean e2e-test build-all build-linux-amd64 build-linux-arm64 build-darwin-amd64 build-darwin-arm64 help install-tools generate-mocks run-example release get-openapi install-openapi-generator
+.PHONY: all test test-race test-cover lint fmt clean e2e-test help install-tools generate-mocks get-openapi install-openapi-generator
 
 # Go parameters
 GOCMD=go
@@ -32,21 +32,7 @@ VERSION=$(shell cat VERSION 2>/dev/null || echo "v0.1.0")
 #   This is the default target that gets executed when running make without arguments
 all: deps test
 
-# TARGET: build
-#
-# DESCRIPTION:
-#   Builds the binary for the current platform ✅
-#
-# PREREQUISITES:
-#   - Go toolchain
-#
-# USAGE EXAMPLES:
-#   - make build
-#
-# EXPLANATION:
-#   Creates the build directory and compiles the main package
-# Build targets removed - not applicable for a library
-
+# Build targets removed - Replaced by goreleaser in CI/CD pipeline
 # TARGET: test
 #
 # DESCRIPTION:
@@ -248,32 +234,7 @@ generate-mocks:
 
 # run-example target removed - examples should be run directly with 'go run'
 
-# TARGET: release
-#
-# DESCRIPTION:
-#   Creates a new GitHub release tag ✅
-#
-# PREREQUISITES:
-#   - GitHub CLI (gh) installed
-#   - Authenticated GitHub account with repository access
-#   - VERSION file containing the release version
-#
-# USAGE EXAMPLES:
-#   - make release
-#   - VERSION=v1.2.3 make release
-#
-# EXPLANATION:
-#   Creates a GitHub release tag using the version specified in the VERSION file
-release:
-	@echo "Creating release $(VERSION)"
-	@if [ -z "$(shell which gh)" ]; then \
-		echo "GitHub CLI not found. Please install it first."; \
-		exit 1; \
-	fi
-	@gh release create $(VERSION) \
-		--title "Exchange Connector $(VERSION)" \
-		--notes "Release $(VERSION)"
-# Removed build-all dependency and binary attachments - not typical for library releases
+# Release target removed - Handled by goreleaser in CI/CD pipeline
 
 # TARGET: help
 #
@@ -291,13 +252,7 @@ help:
 	@echo "Usage: make [target]"
 	@echo ""
 	@echo "Available targets:"
-	@echo "  all              - Run dependencies, tests, and build the binary"
-	@echo "  build            - Build the binary for the current platform"
-	@echo "  build            - Build the binary for the current platform"
-	@echo "  build-linux-amd64 - Build binary for Linux AMD64"
-	@echo "  build-linux-arm64 - Build binary for Linux ARM64" 
-	@echo "  build-darwin-amd64 - Build binary for macOS AMD64 (Intel)"
-	@echo "  build-darwin-arm64 - Build binary for macOS ARM64 (Apple Silicon)"
+	@echo "  all              - Run dependencies and tests"
 	@echo "  test             - Run all tests in the project"
 	@echo "  test-race        - Run tests with race condition detection"
 	@echo "  test-cover       - Run tests with coverage reporting"
@@ -309,8 +264,8 @@ help:
 	@echo "  install-openapi-generator - Install OpenAPI Generator CLI"
 	@echo "  get-openapi      - Download OpenAPI specifications"
 	@echo "  generate-mocks   - Generate mock implementations for testing"
-	@echo "  run-example      - Build and run the example application"
-	@echo "  release          - Create a new GitHub release with binaries"
+	@echo "  run-example      - (Removed - run examples directly with 'go run')"
+	@echo "  release          - (Removed - Handled by goreleaser in CI/CD)"
 	@echo "  help             - Display this help information"
 	@echo ""
 	@echo "Status Indicators:"

@@ -1,0 +1,96 @@
+# .goreleaser.yml
+# Goreleaser configuration for the exchange-connector library
+version: 2
+
+project_name: exchange-connector
+
+# Explicitly define an empty builds section and skip builds entirely
+# for this library project. If a runnable example/cmd exists, configure it here.
+builds:
+  - skip: true
+
+# Create archives (e.g., tar.gz, zip) containing source and essential files
+archives:
+  - id: default
+    format: tar.gz
+    # Include essential files in the archive
+    files:
+      - LICENSE
+      - README.md
+      - go.mod
+      - go.sum
+      - VERSION
+      - "pkg/**/*" # Include package source code
+    # Name template for the archive
+    name_template: "{{ .ProjectName }}_{{ .Version }}_source" # Focus on source archive
+
+# Create checksums for archives
+checksum:
+  name_template: 'checksums.txt'
+  algorithm: sha256
+
+# Include source code explicitly in the release assets
+source:
+  enabled: true
+  format: tar.gz # Can be zip or tar.gz
+  name_template: "{{ .ProjectName }}_{{ .Version }}_source_code"
+
+# Configure snapshot releases for testing (`goreleaser release --snapshot`)
+# name_template is deprecated, goreleaser handles snapshot naming automatically.
+snapshot: {}
+
+# Configure changelog generation from git history
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+      - '^chore:'
+      - 'merge conflict'
+      - Merge pull request
+      - Merge branch
+
+# Configure GitHub Release creation
+release:
+  # Creates draft releases on GitHub. Set draft: false to publish automatically.
+  draft: true
+  # Automatically mark as pre-release based on version tag (e.g., v1.0.0-rc1)
+  prerelease: auto
+  # Optional: Add extra files directly to the release (if not included in archives)
+  # extra_files:
+  #   - glob: ./path/to/your/file
+
+# --- Optional Sections (Uncomment and configure if needed) ---
+
+# Docker configuration
+# dockers:
+#   - image_templates:
+#       - "your_dockerhub_user/{{ .ProjectName }}:{{ .Version }}"
+#       - "your_dockerhub_user/{{ .ProjectName }}:latest"
+#     dockerfile: Dockerfile
+#     use: buildx # Or docker
+#     build_flag_templates:
+#       - "--platform=linux/amd64,linux/arm64"
+#       - "--label=org.opencontainers.image.created={{.Date}}"
+#       - "--label=org.opencontainers.image.title={{.ProjectName}}"
+#       - "--label=org.opencontainers.image.revision={{.FullCommit}}"
+#       - "--label=org.opencontainers.image.version={{.Version}}"
+
+# Homebrew Tap configuration
+# brews:
+#   - name: exchange-connector
+#     tap:
+#       owner: your-github-username
+#       name: homebrew-tap
+#     commit_author:
+#       name: goreleaserbot
+#       email: bot@goreleaser.com
+#     homepage: "https://github.com/your-github-username/exchange-connector"
+#     description: "Description of your project"
+#     # Specify dependencies if any
+#     # dependencies:
+#     #   - name: go
+#     #     type: build
+#     # test: |
+#     #   system "#{bin}/exchange-connector --version"
