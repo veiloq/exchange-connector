@@ -2,7 +2,12 @@ package bybit
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"strconv"
 	"time"
 
 	"github.com/veiloq/exchange-connector/pkg/exchanges/interfaces"
@@ -28,49 +33,31 @@ var supportedIntervals = map[string]bool{
 }
 
 // Connector implements the exchange connector for Bybit API
-// It provides methods for connecting to Bybit's API endpoints
-// and subscribing to various data streams.
 type Connector struct {
 	options *interfaces.ExchangeOptions
 	ws      websocket.WSConnector
 	logger  logging.Logger
 
-	// Track if connected
-	connected bool
-
-	// Track active subscriptions by ID
+	connected     bool
 	subscriptions map[string]struct{}
+	instruments   map[string]BybitInstrumentInfo
 }
 
-// NewConnector creates a new Bybit exchange connector with the given options.
-//
-// Parameters:
-// - options: Configuration options for the connector. If nil, default options are used.
-//
-// Returns:
-// - *Connector: A new Bybit connector instance (not yet connected)
-//
-// Example:
-//
-//	options := &interfaces.ExchangeOptions{
-//		APIKey:    "your-api-key",
-//		APISecret: "your-api-secret",
-//		BaseURL:   "wss://stream.bybit.com/v5/public/spot", // Optional override
-//	}
-//	connector := bybit.NewConnector(options)
+// NewConnector creates a new Bybit exchange connector
 func NewConnector(options *interfaces.ExchangeOptions) *Connector {
-	// Use default options if none provided
 	if options == nil {
 		options = interfaces.NewExchangeOptions()
 	}
 
-	// Set default WebSocket URL if not specified
-	baseURL := "wss://stream.bybit.com/v5/public/spot"
+	// TODO check documentation and build convenient URL buildler
+	wsBaseURL := "wss://stream.bybit.com/v5/public/spot"
 	if options.BaseURL != "" {
-		baseURL = options.BaseURL
+		wsBaseURL = options.BaseURL
 	}
 
 	logger := logging.NewLogger()
+
+	// TODO move to a helper module
 	if options.LogLevel != "" {
 		switch options.LogLevel {
 		case "debug":
@@ -84,7 +71,6 @@ func NewConnector(options *interfaces.ExchangeOptions) *Connector {
 		}
 	}
 
-	// Set default values for WebSocket config
 	heartbeatInterval := 20 * time.Second
 	if options.WSHeartbeatInterval > 0 {
 		heartbeatInterval = options.WSHeartbeatInterval
@@ -98,7 +84,7 @@ func NewConnector(options *interfaces.ExchangeOptions) *Connector {
 	return &Connector{
 		options: options,
 		ws: websocket.NewConnector(websocket.Config{
-			URL:               baseURL,
+			URL:               wsBaseURL,
 			HeartbeatInterval: heartbeatInterval,
 			ReconnectInterval: reconnectInterval,
 			MaxRetries:        3,
@@ -106,28 +92,22 @@ func NewConnector(options *interfaces.ExchangeOptions) *Connector {
 		logger:        logger,
 		connected:     false,
 		subscriptions: make(map[string]struct{}),
+		instruments:   make(map[string]BybitInstrumentInfo),
 	}
 }
 
-// Connect establishes a connection to the Bybit WebSocket API.
-// It should be called before using any other methods that require a connection.
-//
-// Parameters:
-// - ctx: Context for controlling the connection timeout/cancellation
-//
-// Returns:
-// - error: An error if the connection cannot be established
-//
-// Example:
-//
-//	ctx := context.Background()
-//	if err := connector.Connect(ctx); err != nil {
-//		log.Fatalf("Failed to connect: %v", err)
-//	}
+// Connect establishes a connection to the Bybit WebSocket API
 func (c *Connector) Connect(ctx context.Context) error {
-	// Log connection attempt with the URL
 	c.logger.Info("connecting to Bybit WebSocket API",
 		logging.String("url", c.ws.GetConfig().URL))
+
+	// Fetch instruments info first
+	// Fetch instruments info first
+	if err := c.fetchInstrumentsInfo(ctx); err != nil {
+		c.logger.Error("failed to fetch initial instruments info", logging.Error(err))
+		// Return the error directly from fetchInstrumentsInfo, as it's already descriptive
+		return err
+	}
 
 	if err := c.ws.Connect(ctx); err != nil {
 		c.logger.Error("failed to connect to Bybit", logging.Error(err))
@@ -139,15 +119,7 @@ func (c *Connector) Connect(ctx context.Context) error {
 	return nil
 }
 
-// Close properly terminates the connection to the Bybit WebSocket API.
-// It should be called when the connector is no longer needed to free resources.
-//
-// Returns:
-// - error: An error if the connection cannot be closed properly
-//
-// Example:
-//
-//	defer connector.Close()
+// Close properly terminates the connection
 func (c *Connector) Close() error {
 	if !c.connected {
 		return interfaces.ErrNotConnected
@@ -169,13 +141,17 @@ func (c *Connector) Close() error {
 
 // isValidSymbol checks if a trading pair symbol is valid
 func (c *Connector) isValidSymbol(symbol string) bool {
-	// TODO: Implement proper symbol validation against Bybit supported symbols
-	// For now, just check if it's not empty and has a reasonable format
-	return symbol != "" && len(symbol) >= 5
+	if len(c.instruments) == 0 {
+		c.logger.Warn("instruments map is empty, falling back to basic symbol validation")
+		return symbol != "" && len(symbol) >= 5
+	}
+	_, ok := c.instruments[symbol]
+	return ok
 }
 
 // isValidInterval checks if a time interval is supported by Bybit
 func (c *Connector) isValidInterval(interval string) bool {
+	// Check the map directly using the standard interval format ("1m", "1h", etc.)
 	_, ok := supportedIntervals[interval]
 	return ok
 }
@@ -185,527 +161,521 @@ func (c *Connector) validateTimeRange(startTime, endTime time.Time) error {
 	if startTime.IsZero() || endTime.IsZero() {
 		return interfaces.ErrInvalidTimeRange
 	}
-
 	if endTime.Before(startTime) {
 		return interfaces.ErrInvalidTimeRange
 	}
-
-	// Bybit has a maximum time range of 200 candles by default
-	// We could add additional validation here based on the interval
 	return nil
 }
 
-// GetCandles retrieves historical candlestick data for a specified symbol and time interval.
-// This is a synchronous request that returns historical candle data.
-//
-// Parameters:
-// - ctx: Context for timeout/cancellation control
-// - req: CandleRequest containing symbol, timeframe, and time range parameters
-//
-// Returns:
-// - []interfaces.Candle: Array of candle data
-// - error: An error if the request fails or parameters are invalid
-//
-// Example:
-//
-//	req := interfaces.CandleRequest{
-//		Symbol:   "BTCUSDT",
-//		Interval: "1h",
-//		StartTime: time.Now().Add(-24 * time.Hour),
-//		EndTime:   time.Now(),
-//		Limit:    100,
-//	}
-//	candles, err := connector.GetCandles(ctx, req)
-//	if err != nil {
-//		log.Printf("Error getting candles: %v", err)
-//		return
-//	}
-//	for _, candle := range candles {
-//		fmt.Printf("Time: %v, Open: %.2f, Close: %.2f\n", candle.StartTime, candle.Open, candle.Close)
-//	}
-func (c *Connector) GetCandles(ctx context.Context, req interfaces.CandleRequest) ([]interfaces.Candle, error) {
-	// Connection check
-	if !c.connected {
-		return nil, interfaces.ErrNotConnected
+// ---------------------------------------------------------
+// DRY Helper: doBybitGet
+// ---------------------------------------------------------
+
+func (c *Connector) doBybitGet(ctx context.Context, path string, params url.Values) ([]byte, int, error) {
+	baseURL, _ := url.Parse(c.options.RestURL)
+	if baseURL == nil || baseURL.String() == "" {
+		baseURL, _ = url.Parse("https://api.bybit.com")
+	}
+	baseURL.Path = path
+	baseURL.RawQuery = params.Encode()
+
+	c.logger.Debug("constructed Bybit API URL", logging.String("url", baseURL.String()))
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL.String(), nil)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to create Bybit API request: %w", err)
 	}
 
-	// Validate parameters
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to execute Bybit API request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, resp.StatusCode, fmt.Errorf("failed to read Bybit API response body: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, resp.StatusCode, fmt.Errorf("Bybit API error: status %d, body: %s", resp.StatusCode, string(body))
+	}
+
+	return body, resp.StatusCode, nil
+}
+
+// ---------------------------------------------------------
+// DRY Helper: checkBybitRetCode
+// ---------------------------------------------------------
+
+type BybitBaseResponse struct {
+	RetCode    int             `json:"retCode"`
+	RetMsg     string          `json:"retMsg"`
+	RetExtInfo json.RawMessage `json:"retExtInfo"`
+	Time       int64           `json:"time"`
+}
+
+func checkBybitRetCode(r BybitBaseResponse) error {
+	if r.RetCode != 0 {
+		return fmt.Errorf("Bybit API error: code %d, message: %s", r.RetCode, r.RetMsg)
+	}
+	return nil
+}
+
+func parseBybitResponse[T interface{ GetBase() BybitBaseResponse }](body []byte) (*T, error) {
+	var resp T
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, fmt.Errorf("failed to parse Bybit response JSON: %w", err)
+	}
+	base := resp.GetBase()
+	if err := checkBybitRetCode(base); err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
+// Each response struct implements this so parseBybitResponse can fetch the base part.
+func (r BybitKlineResponse) GetBase() BybitBaseResponse {
+	return BybitBaseResponse{
+		RetCode:    r.RetCode,
+		RetMsg:     r.RetMsg,
+		RetExtInfo: r.RetExtInfo,
+		Time:       r.Time,
+	}
+}
+func (r BybitOrderBookResponse) GetBase() BybitBaseResponse {
+	return BybitBaseResponse{
+		RetCode:    r.RetCode,
+		RetMsg:     r.RetMsg,
+		RetExtInfo: r.RetExtInfo,
+		Time:       r.Time,
+	}
+}
+func (r BybitInstrumentsInfoResponse) GetBase() BybitBaseResponse {
+	return BybitBaseResponse{
+		RetCode:    r.RetCode,
+		RetMsg:     r.RetMsg,
+		RetExtInfo: r.RetExtInfo,
+		Time:       r.Time,
+	}
+}
+
+// ---------------------------------------------------------
+// Small parse helpers to reduce repetition
+// ---------------------------------------------------------
+
+// parseFloatWithLog tries to parse a float; logs a warning on failure.
+func parseFloatWithLog(logger logging.Logger, val string, fieldName string) (float64, bool) {
+	f, err := strconv.ParseFloat(val, 64)
+	if err != nil {
+		logger.Warn(fmt.Sprintf("failed to parse %s", fieldName),
+			logging.String("value", val),
+			logging.Error(err))
+		return 0, false
+	}
+	return f, true
+}
+
+// parseKlineRow expects something like [timestamp, open, high, low, close, volume, ...]
+func parseKlineRow(logger logging.Logger, row []string) (time.Time, float64, float64, float64, float64, float64, bool) {
+	if len(row) < 7 {
+		logger.Warn("incomplete kline data point", logging.String("data", fmt.Sprintf("%v", row)))
+		return time.Time{}, 0, 0, 0, 0, 0, false
+	}
+
+	startTimeMs, err := strconv.ParseInt(row[0], 10, 64)
+	if err != nil {
+		logger.Warn("failed to parse timestamp",
+			logging.String("value", row[0]),
+			logging.Error(err))
+		return time.Time{}, 0, 0, 0, 0, 0, false
+	}
+
+	open, ok1 := parseFloatWithLog(logger, row[1], "open price")
+	high, ok2 := parseFloatWithLog(logger, row[2], "high price")
+	low, ok3 := parseFloatWithLog(logger, row[3], "low price")
+	closePrice, ok4 := parseFloatWithLog(logger, row[4], "close price")
+	volume, ok5 := parseFloatWithLog(logger, row[5], "volume")
+
+	if !ok1 || !ok2 || !ok3 || !ok4 || !ok5 {
+		// Already logged, skip this row
+		return time.Time{}, 0, 0, 0, 0, 0, false
+	}
+
+	return time.UnixMilli(startTimeMs), open, high, low, closePrice, volume, true
+}
+
+// parseOrderBookRow expects something like [price, quantity]
+func parseOrderBookRow(logger logging.Logger, row []string, rowType string) (float64, float64, bool) {
+	if len(row) != 2 {
+		logger.Warn(fmt.Sprintf("invalid %s format", rowType),
+			logging.String("row_data", fmt.Sprintf("%v", row)))
+		return 0, 0, false
+	}
+
+	price, ok1 := parseFloatWithLog(logger, row[0], rowType+" price")
+	quantity, ok2 := parseFloatWithLog(logger, row[1], rowType+" quantity")
+	if !ok1 || !ok2 {
+		return 0, 0, false
+	}
+
+	return price, quantity, true
+}
+
+// ---------------------------------------------------------
+// GetCandles
+// ---------------------------------------------------------
+
+func (c *Connector) GetCandles(ctx context.Context, req interfaces.CandleRequest) ([]interfaces.Candle, error) {
+	if !c.connected { // Check connection status first
+		return nil, interfaces.ErrNotConnected
+	}
 	if !c.isValidSymbol(req.Symbol) {
 		return nil, interfaces.ErrInvalidSymbol
 	}
-
 	if !c.isValidInterval(req.Interval) {
 		return nil, interfaces.ErrInvalidInterval
 	}
-
 	if err := c.validateTimeRange(req.StartTime, req.EndTime); err != nil {
 		return nil, err
 	}
 
-	// Enforce reasonable limits
 	if req.Limit <= 0 {
-		req.Limit = 100 // Default limit
+		req.Limit = 100
 	} else if req.Limit > 1000 {
-		req.Limit = 1000 // Maximum limit
+		req.Limit = 1000
 	}
 
-	// TODO: Implement actual candle fetching from Bybit API
-	// For now, return mock data
-	c.logger.Info("fetching candles",
+	c.logger.Debug("fetching candles from Bybit API",
 		logging.String("symbol", req.Symbol),
 		logging.String("interval", req.Interval),
-		logging.Int("limit", req.Limit))
+		logging.String("start", req.StartTime.Format(time.RFC3339)),
+		logging.String("end", req.EndTime.Format(time.RFC3339)),
+		logging.Int("limit", req.Limit),
+	)
 
-	// Mock data for the sample
-	candles := make([]interfaces.Candle, 0, req.Limit)
-	for i := 0; i < req.Limit; i++ {
-		candle := interfaces.Candle{
-			Symbol:    req.Symbol,
-			StartTime: req.StartTime.Add(time.Duration(i) * getIntervalDuration(req.Interval)),
-			Open:      50000 + float64(i),
-			High:      51000 + float64(i),
-			Low:       49000 + float64(i),
-			Close:     50500 + float64(i),
-			Volume:    100 + float64(i),
-		}
-		candles = append(candles, candle)
+	params := url.Values{}
+	params.Add("category", "spot")
+	params.Add("symbol", req.Symbol)                             // Add symbol to params
+	params.Add("interval", convertIntervalToBybit(req.Interval)) // Convert and add interval
+	params.Add("start", strconv.FormatInt(req.StartTime.UnixMilli(), 10))
+	params.Add("end", strconv.FormatInt(req.EndTime.UnixMilli(), 10))
+	params.Add("limit", strconv.Itoa(req.Limit))
+
+	body, _, err := c.doBybitGet(ctx, "/v5/market/kline", params)
+	if err != nil {
+		c.logger.Error("failed to get candles from Bybit API", logging.Error(err))
+		return nil, err
 	}
 
-	c.logger.Info("successfully fetched candles",
+	bybitResp, err := parseBybitResponse[BybitKlineResponse](body)
+	if err != nil {
+		c.logger.Error("failed to parse Bybit Kline response", logging.Error(err))
+		return nil, err
+	}
+
+	candles := make([]interfaces.Candle, 0, len(bybitResp.Result.List)) // Preallocate slice
+	for _, row := range bybitResp.Result.List {
+		st, o, h, l, closeP, vol, ok := parseKlineRow(c.logger, row)
+		if !ok {
+			continue
+		}
+		candles = append(candles, interfaces.Candle{
+			Symbol:    req.Symbol,
+			StartTime: st,
+			Open:      o,
+			High:      h,
+			Low:       l,
+			Close:     closeP,
+			Volume:    vol,
+		})
+	}
+
+	c.logger.Info("successfully fetched candles from Bybit API",
 		logging.String("symbol", req.Symbol),
 		logging.Int("count", len(candles)))
+
 	return candles, nil
 }
 
-// Helper function to convert interval string to time.Duration
-func getIntervalDuration(interval string) time.Duration {
-	switch interval {
-	case "1m":
-		return time.Minute
-	case "3m":
-		return 3 * time.Minute
-	case "5m":
-		return 5 * time.Minute
-	case "15m":
-		return 15 * time.Minute
-	case "30m":
-		return 30 * time.Minute
-	case "1h":
-		return time.Hour
-	case "2h":
-		return 2 * time.Hour
-	case "4h":
-		return 4 * time.Hour
-	case "6h":
-		return 6 * time.Hour
-	case "12h":
-		return 12 * time.Hour
-	case "1d":
-		return 24 * time.Hour
-	case "1w":
-		return 7 * 24 * time.Hour
-	case "1M":
-		return 30 * 24 * time.Hour // Approximation
-	default:
-		return time.Hour // Default fallback
-	}
-}
+// ---------------------------------------------------------
+// GetOrderBook
+// ---------------------------------------------------------
 
-// SubscribeCandles sets up a real-time subscription for candlestick updates.
-// The provided handler function will be called whenever new candle data is available.
-//
-// Parameters:
-// - ctx: Context for controlling the subscription lifetime
-// - sub: CandleSubscription with symbols and interval to subscribe to
-// - handler: Callback function that will be invoked with each candle update
-//
-// Returns:
-// - error: An error if the subscription cannot be established
-//
-// Example:
-//
-//	sub := interfaces.CandleSubscription{
-//		Symbols:  []string{"BTCUSDT"},
-//		Interval: "1m",
-//	}
-//	err := connector.SubscribeCandles(ctx, sub, func(candle interfaces.Candle) {
-//		fmt.Printf("New candle for %s: Open=%.2f, Close=%.2f, Volume=%.2f\n",
-//			candle.Symbol, candle.Open, candle.Close, candle.Volume)
-//	})
-//	if err != nil {
-//		log.Printf("Error subscribing to candles: %v", err)
-//	}
-func (c *Connector) SubscribeCandles(ctx context.Context, sub interfaces.CandleSubscription, handler interfaces.CandleHandler) error {
-	// Connection check
-	if !c.connected {
-		return interfaces.ErrNotConnected
-	}
-
-	// Parameter validation
-	if len(sub.Symbols) == 0 {
-		return interfaces.ErrInvalidSymbol
-	}
-
-	// Check that all symbols are valid
-	for _, symbol := range sub.Symbols {
-		if !c.isValidSymbol(symbol) {
-			return interfaces.NewMarketError(symbol, "invalid symbol", interfaces.ErrInvalidSymbol)
-		}
-	}
-
-	if !c.isValidInterval(sub.Interval) {
-		return interfaces.ErrInvalidInterval
-	}
-
-	// Subscribe to kline updates for each symbol
-	for _, symbol := range sub.Symbols {
-		topic := fmt.Sprintf("kline.%s.%s", sub.Interval, symbol)
-
-		// Track the subscription
-		c.subscriptions[topic] = struct{}{}
-
-		c.logger.Info("subscribing to candle updates",
-			logging.String("symbol", symbol),
-			logging.String("interval", sub.Interval),
-			logging.String("topic", topic))
-
-		if err := c.ws.Subscribe(topic, func(message []byte) {
-			// TODO: Implement actual message parsing from Bybit format
-			// For now, just send a mock candle
-			handler(interfaces.Candle{
-				Symbol:    symbol,
-				StartTime: time.Now().Truncate(getIntervalDuration(sub.Interval)),
-				Open:      50000,
-				High:      51000,
-				Low:       49000,
-				Close:     50500,
-				Volume:    100,
-			})
-		}); err != nil {
-			c.logger.Error("failed to subscribe to candle updates",
-				logging.String("symbol", symbol),
-				logging.String("interval", sub.Interval),
-				logging.Error(err))
-			return interfaces.NewMarketError(symbol, "failed to subscribe to candle updates", err)
-		}
-	}
-
-	return nil
-}
-
-// GetTicker retrieves the current market ticker information for a specific symbol.
-// This includes the latest price, volume, and other market statistics.
-//
-// Parameters:
-// - ctx: Context for timeout/cancellation control
-// - symbol: The trading pair symbol to get data for (e.g., "BTCUSDT")
-//
-// Returns:
-// - *interfaces.Ticker: Ticker data for the requested symbol
-// - error: An error if the request fails or parameters are invalid
-//
-// Example:
-//
-//	ticker, err := connector.GetTicker(ctx, "BTCUSDT")
-//	if err != nil {
-//		log.Printf("Error getting ticker: %v", err)
-//		return
-//	}
-//	fmt.Printf("Current price of %s: %.2f, 24h volume: %.2f\n",
-//		ticker.Symbol, ticker.LastPrice, ticker.Volume24h)
-func (c *Connector) GetTicker(ctx context.Context, symbol string) (*interfaces.Ticker, error) {
-	// Connection check
-	if !c.connected {
-		return nil, interfaces.ErrNotConnected
-	}
-
-	// Validate parameters
-	if !c.isValidSymbol(symbol) {
-		return nil, interfaces.ErrInvalidSymbol
-	}
-
-	// TODO: Implement actual ticker fetching from Bybit API
-	// For now, return mock data
-	c.logger.Info("fetching ticker", logging.String("symbol", symbol))
-
-	ticker := &interfaces.Ticker{
-		Symbol:    symbol,
-		LastPrice: 50000,
-		Volume24h: 1000,
-	}
-
-	return ticker, nil
-}
-
-// SubscribeTicker sets up a real-time subscription for ticker updates.
-// The provided handler function will be called whenever the ticker data is updated.
-//
-// Parameters:
-// - ctx: Context for controlling the subscription lifetime
-// - symbols: List of trading pair symbols to subscribe to
-// - handler: Callback function that will be invoked with each ticker update
-//
-// Returns:
-// - error: An error if the subscription cannot be established
-//
-// Example:
-//
-//	symbols := []string{"BTCUSDT", "ETHUSDT"}
-//	err := connector.SubscribeTicker(ctx, symbols, func(ticker interfaces.Ticker) {
-//		fmt.Printf("Ticker update for %s: Price=%.2f, Volume=%.2f\n",
-//			ticker.Symbol, ticker.LastPrice, ticker.Volume24h)
-//	})
-//	if err != nil {
-//		log.Printf("Error subscribing to ticker: %v", err)
-//	}
-func (c *Connector) SubscribeTicker(ctx context.Context, symbols []string, handler interfaces.TickerHandler) error {
-	// Connection check
-	if !c.connected {
-		return interfaces.ErrNotConnected
-	}
-
-	// Parameter validation
-	if len(symbols) == 0 {
-		return interfaces.ErrInvalidSymbol
-	}
-
-	// Check that all symbols are valid
-	for _, symbol := range symbols {
-		if !c.isValidSymbol(symbol) {
-			return interfaces.NewMarketError(symbol, "invalid symbol", interfaces.ErrInvalidSymbol)
-		}
-	}
-
-	// Subscribe to ticker updates for each symbol
-	for _, symbol := range symbols {
-		topic := fmt.Sprintf("ticker.%s", symbol)
-
-		// Track the subscription
-		c.subscriptions[topic] = struct{}{}
-
-		c.logger.Info("subscribing to ticker updates",
-			logging.String("symbol", symbol),
-			logging.String("topic", topic))
-
-		if err := c.ws.Subscribe(topic, func(message []byte) {
-			// TODO: Implement actual message parsing from Bybit format
-			// For now, just send a mock ticker
-			handler(interfaces.Ticker{
-				Symbol:    symbol,
-				LastPrice: 50000,
-				Volume24h: 1000,
-			})
-		}); err != nil {
-			c.logger.Error("failed to subscribe to ticker updates",
-				logging.String("symbol", symbol),
-				logging.Error(err))
-			return interfaces.NewMarketError(symbol, "failed to subscribe to ticker updates", err)
-		}
-	}
-
-	return nil
-}
-
-// GetOrderBook retrieves the current order book for a specific symbol with the specified depth.
-// This provides a snapshot of all buy and sell orders currently on the market.
-//
-// Parameters:
-// - ctx: Context for timeout/cancellation control
-// - symbol: The trading pair symbol to get data for (e.g., "BTCUSDT")
-// - depth: Maximum number of price levels to retrieve
-//
-// Returns:
-// - *interfaces.OrderBook: Order book data with bids and asks
-// - error: An error if the request fails or parameters are invalid
-//
-// Example:
-//
-//	orderBook, err := connector.GetOrderBook(ctx, "BTCUSDT", 20)
-//	if err != nil {
-//		log.Printf("Error getting order book: %v", err)
-//		return
-//	}
-//	fmt.Printf("Order book for %s:\n", orderBook.Symbol)
-//	fmt.Println("Bids:")
-//	for _, bid := range orderBook.Bids {
-//		fmt.Printf("  Price: %.2f, Quantity: %.8f\n", bid.Price, bid.Quantity)
-//	}
-//	fmt.Println("Asks:")
-//	for _, ask := range orderBook.Asks {
-//		fmt.Printf("  Price: %.2f, Quantity: %.8f\n", ask.Price, ask.Quantity)
-//	}
 func (c *Connector) GetOrderBook(ctx context.Context, symbol string, depth int) (*interfaces.OrderBook, error) {
-	// Connection check
-	if !c.connected {
+	if !c.connected { // Check connection status first
 		return nil, interfaces.ErrNotConnected
 	}
-
-	// Validate parameters
 	if !c.isValidSymbol(symbol) {
 		return nil, interfaces.ErrInvalidSymbol
 	}
+	bybitDepth := 50
+	if depth <= 1 {
+		bybitDepth = 1
+	} else if depth <= 50 {
+		bybitDepth = 50
+	} else {
+		bybitDepth = 200
+	}
+	c.logger.Debug("adjusted order book depth",
+		logging.Int("requested_depth", depth),
+		logging.Int("api_depth", bybitDepth),
+	)
 
-	// Enforce reasonable depth limits
-	if depth <= 0 {
-		depth = 20 // Default depth
-	} else if depth > 200 {
-		depth = 200 // Maximum depth
+	params := url.Values{}
+	params.Add("category", "spot")
+	params.Add("symbol", symbol)                  // Add symbol to params
+	params.Add("limit", strconv.Itoa(bybitDepth)) // Add depth limit
+
+	body, _, err := c.doBybitGet(ctx, "/v5/market/orderbook", params)
+	if err != nil {
+		c.logger.Error("failed to get order book", logging.Error(err))
+		return nil, err
 	}
 
-	// TODO: Implement actual order book fetching from Bybit API
-	// For now, return mock data
-	c.logger.Info("fetching order book",
-		logging.String("symbol", symbol),
-		logging.Int("depth", depth))
-
-	// Create mock order book with specified depth
-	bids := make([]interfaces.OrderBookLevel, depth)
-	asks := make([]interfaces.OrderBookLevel, depth)
-
-	basePrice := 50000.0
-	for i := 0; i < depth; i++ {
-		// Bids decrease in price (highest first)
-		bids[i] = interfaces.OrderBookLevel{
-			Price:    basePrice - float64(i)*10,
-			Quantity: 1.0 + float64(i)*0.1,
-		}
-
-		// Asks increase in price (lowest first)
-		asks[i] = interfaces.OrderBookLevel{
-			Price:    basePrice + float64(i)*10,
-			Quantity: 1.0 + float64(i)*0.1,
-		}
+	bybitResp, err := parseBybitResponse[BybitOrderBookResponse](body)
+	if err != nil {
+		c.logger.Error("failed to parse Bybit OrderBook response", logging.Error(err))
+		return nil, err
 	}
 
 	orderBook := &interfaces.OrderBook{
-		Symbol: symbol,
-		Bids:   bids,
-		Asks:   asks,
+		Symbol: bybitResp.Result.Symbol,
+		Bids:   make([]interfaces.OrderBookLevel, 0, len(bybitResp.Result.Bids)),
+		Asks:   make([]interfaces.OrderBookLevel, 0, len(bybitResp.Result.Asks)),
 	}
+
+	for _, bid := range bybitResp.Result.Bids {
+		price, quantity, ok := parseOrderBookRow(c.logger, bid, "bid")
+		if !ok {
+			continue
+		}
+		orderBook.Bids = append(orderBook.Bids, interfaces.OrderBookLevel{
+			Price:    price,
+			Quantity: quantity,
+		})
+	}
+	for _, ask := range bybitResp.Result.Asks {
+		price, quantity, ok := parseOrderBookRow(c.logger, ask, "ask")
+		if !ok {
+			continue
+		}
+		orderBook.Asks = append(orderBook.Asks, interfaces.OrderBookLevel{
+			Price:    price,
+			Quantity: quantity,
+		})
+	}
+
+	c.logger.Info("successfully fetched order book from Bybit API",
+		logging.String("symbol", orderBook.Symbol),
+		logging.Int("bid_count", len(orderBook.Bids)),
+		logging.Int("ask_count", len(orderBook.Asks)))
 
 	return orderBook, nil
 }
 
-// SubscribeOrderBook sets up a real-time subscription for order book updates.
-// The provided handler function will be called whenever the order book changes.
-//
-// Parameters:
-// - ctx: Context for controlling the subscription lifetime
-// - symbols: List of trading pair symbols to subscribe to
-// - handler: Callback function that will be invoked with each order book update
-//
-// Returns:
-// - error: An error if the subscription cannot be established
-//
-// Example:
-//
-//	symbols := []string{"BTCUSDT"}
-//	err := connector.SubscribeOrderBook(ctx, symbols, func(orderBook interfaces.OrderBook) {
-//		fmt.Printf("Order book update for %s, %d bids, %d asks\n",
-//			orderBook.Symbol, len(orderBook.Bids), len(orderBook.Asks))
-//
-//		// Print top bid and ask
-//		if len(orderBook.Bids) > 0 && len(orderBook.Asks) > 0 {
-//			spread := orderBook.Asks[0].Price - orderBook.Bids[0].Price
-//			fmt.Printf("Top bid: %.2f, Top ask: %.2f, Spread: %.2f\n",
-//				orderBook.Bids[0].Price, orderBook.Asks[0].Price, spread)
-//		}
-//	})
-//	if err != nil {
-//		log.Printf("Error subscribing to order book: %v", err)
-//	}
-func (c *Connector) SubscribeOrderBook(ctx context.Context, symbols []string, handler interfaces.OrderBookHandler) error {
-	// Connection check
-	if !c.connected {
+// ---------------------------------------------------------
+// SubscribeCandles
+// ---------------------------------------------------------
+
+// SubscribeCandles subscribes to the candlestick stream for a given symbol and interval.
+func (c *Connector) SubscribeCandles(symbol string, interval string) error {
+	if !c.connected { // Check connection status first
 		return interfaces.ErrNotConnected
 	}
 
-	// Parameter validation
-	if len(symbols) == 0 {
-		return interfaces.ErrInvalidSymbol
+	if !c.isValidInterval(interval) {
+		return interfaces.ErrInvalidInterval
 	}
 
-	// Check that all symbols are valid
-	for _, symbol := range symbols {
-		if !c.isValidSymbol(symbol) {
-			return interfaces.NewMarketError(symbol, "invalid symbol", interfaces.ErrInvalidSymbol)
-		}
+	// Bybit uses specific topic formats, e.g., kline.{interval}.{symbol}
+	bybitInterval := convertIntervalToBybit(interval)
+	topic := fmt.Sprintf("kline.%s.%s", bybitInterval, symbol)
+
+	// Check if already subscribed (optional, depends on desired behavior)
+	if _, exists := c.subscriptions[topic]; exists {
+		c.logger.Warn("already subscribed to topic", logging.String("topic", topic))
+		return nil // Or return a specific error like ErrAlreadySubscribed
 	}
 
-	// Subscribe to order book updates for each symbol
-	for _, symbol := range symbols {
-		topic := fmt.Sprintf("orderbook.%s", symbol)
-
-		// Track the subscription
-		c.subscriptions[topic] = struct{}{}
-
-		c.logger.Info("subscribing to order book updates",
-			logging.String("symbol", symbol),
-			logging.String("topic", topic))
-
-		if err := c.ws.Subscribe(topic, func(message []byte) {
-			// TODO: Implement actual message parsing from Bybit format
-			// For now, just send a mock order book
-			handler(interfaces.OrderBook{
-				Symbol: symbol,
-				Bids: []interfaces.OrderBookLevel{
-					{Price: 49900, Quantity: 1.0},
-					{Price: 49800, Quantity: 2.0},
-				},
-				Asks: []interfaces.OrderBookLevel{
-					{Price: 50100, Quantity: 1.0},
-					{Price: 50200, Quantity: 2.0},
-				},
-			})
-		}); err != nil {
-			c.logger.Error("failed to subscribe to order book updates",
-				logging.String("symbol", symbol),
-				logging.Error(err))
-			return interfaces.NewMarketError(symbol, "failed to subscribe to order book updates", err)
-		}
+	c.logger.Info("subscribing to Bybit topic", logging.String("topic", topic))
+	// The actual subscription logic depends on the websocket.WSConnector implementation.
+	// Assuming it takes the topic and a message handler (which might be nil for public streams
+	// or handled internally by the WSConnector).
+	err := c.ws.Subscribe(topic, nil) // Pass nil or an appropriate handler
+	if err != nil {
+		c.logger.Error("failed to subscribe via WebSocket", logging.String("topic", topic), logging.Error(err))
+		return fmt.Errorf("failed to subscribe to Bybit topic %s: %w", topic, err)
 	}
 
+	// Record the subscription internally
+	c.subscriptions[topic] = struct{}{}
+	c.logger.Info("successfully subscribed to Bybit topic", logging.String("topic", topic))
 	return nil
 }
 
-// Unsubscribe terminates an active WebSocket subscription.
-//
-// Parameters:
-// - ctx: Context for timeout/cancellation control
-// - subscriptionID: The topic identifier to unsubscribe from
-//
-// Returns:
-// - error: An error if the unsubscription fails
-//
-// Example:
-//
-//	err := connector.Unsubscribe(ctx, "ticker.BTCUSDT")
-//	if err != nil {
-//		log.Printf("Error unsubscribing: %v", err)
-//	}
-func (c *Connector) Unsubscribe(ctx context.Context, subscriptionID string) error {
-	// Connection check
-	if !c.connected {
+// ---------------------------------------------------------
+// UnsubscribeCandles
+// ---------------------------------------------------------
+
+// UnsubscribeCandles unsubscribes from the candlestick stream for a given symbol and interval.
+func (c *Connector) UnsubscribeCandles(symbol string, interval string) error {
+	if !c.connected { // Check connection status first
 		return interfaces.ErrNotConnected
 	}
 
-	// Check if subscription exists
-	if _, exists := c.subscriptions[subscriptionID]; !exists {
-		return interfaces.ErrSubscriptionNotFound
+	// Validate interval (optional but good practice)
+	if !c.isValidInterval(interval) {
+		return interfaces.ErrInvalidInterval
 	}
 
-	c.logger.Info("unsubscribing from topic", logging.String("topic", subscriptionID))
+	bybitInterval := convertIntervalToBybit(interval)
+	topic := fmt.Sprintf("kline.%s.%s", bybitInterval, symbol)
 
-	if err := c.ws.Unsubscribe(subscriptionID); err != nil {
-		c.logger.Error("failed to unsubscribe from topic",
-			logging.String("topic", subscriptionID),
-			logging.Error(err))
-		return fmt.Errorf("failed to unsubscribe from %s: %w", subscriptionID, err)
+	// Check if actually subscribed
+	if _, exists := c.subscriptions[topic]; !exists {
+		return fmt.Errorf("not subscribed to topic: %s", topic) // Return error if not subscribed
 	}
 
-	// Remove from tracked subscriptions
-	delete(c.subscriptions, subscriptionID)
+	c.logger.Info("unsubscribing from Bybit topic", logging.String("topic", topic))
+	err := c.ws.Unsubscribe(topic)
+	if err != nil {
+		c.logger.Error("failed to unsubscribe via WebSocket", logging.String("topic", topic), logging.Error(err))
+		// Decide if the internal state should be cleaned up even if WS call fails
+		// delete(c.subscriptions, topic) // Optional: remove even on error?
+		return fmt.Errorf("failed to unsubscribe from Bybit topic %s: %w", topic, err)
+	}
 
-	c.logger.Info("successfully unsubscribed from topic", logging.String("topic", subscriptionID))
+	// Remove the subscription from internal tracking
+	delete(c.subscriptions, topic)
+	c.logger.Info("successfully unsubscribed from Bybit topic", logging.String("topic", topic))
 	return nil
+}
+
+// ---------------------------------------------------------
+// fetchInstrumentsInfo
+// ---------------------------------------------------------
+
+func (c *Connector) fetchInstrumentsInfo(ctx context.Context) error {
+	c.logger.Info("fetching instruments info from Bybit API")
+
+	params := url.Values{}
+	params.Add("category", "spot")
+
+	body, _, err := c.doBybitGet(ctx, "/v5/market/instruments-info", params)
+	if err != nil {
+		return fmt.Errorf("failed to fetch Bybit instruments info: %w", err)
+	}
+
+	bybitResp, err := parseBybitResponse[BybitInstrumentsInfoResponse](body)
+	if err != nil {
+		return fmt.Errorf("failed to parse Bybit instruments info JSON: %w", err)
+	}
+
+	newInstruments := make(map[string]BybitInstrumentInfo)
+	for _, instrument := range bybitResp.Result.List {
+		if instrument.Status == "Trading" {
+			newInstruments[instrument.Symbol] = instrument
+		}
+	}
+	c.instruments = newInstruments // Update the connector's instruments map
+
+	c.logger.Info("successfully fetched and updated instruments info",
+		logging.Int("count", len(c.instruments)))
+	return nil
+}
+
+// Helper function to convert interval string
+func convertIntervalToBybit(interval string) string {
+	switch interval {
+	case "1m":
+		return "1"
+	case "3m":
+		return "3"
+	case "5m":
+		return "5"
+	case "15m":
+		return "15"
+	case "30m":
+		return "30"
+	case "1h":
+		return "60"
+	case "2h":
+		return "120"
+	case "4h":
+		return "240"
+	case "6h":
+		return "360"
+	case "12h":
+		return "720"
+	case "1d":
+		return "D"
+	case "1w":
+		return "W"
+	case "1M":
+		return "M"
+	default:
+		return interval
+	}
+}
+
+// ---------------------------------------------------------
+// Bybit API Response Structs
+// ---------------------------------------------------------
+
+type BybitKlineResponse struct {
+	BybitBaseResponse
+	Result BybitKlineResult `json:"result"`
+}
+
+type BybitKlineResult struct {
+	Category string     `json:"category"`
+	Symbol   string     `json:"symbol"`
+	List     [][]string `json:"list"`
+}
+
+type BybitOrderBookResponse struct {
+	BybitBaseResponse
+	Result BybitOrderBookResult `json:"result"`
+}
+
+type BybitOrderBookResult struct {
+	Symbol    string     `json:"s"`
+	Bids      [][]string `json:"b"`
+	Asks      [][]string `json:"a"`
+	Timestamp int64      `json:"ts"`
+	UpdateID  int64      `json:"u"`
+}
+
+type BybitInstrumentsInfoResponse struct {
+	BybitBaseResponse
+	Result BybitInstrumentsInfoResult `json:"result"`
+}
+
+type BybitInstrumentsInfoResult struct {
+	Category       string                `json:"category"`
+	List           []BybitInstrumentInfo `json:"list"`
+	NextPageCursor string                `json:"nextPageCursor"`
+}
+
+type BybitInstrumentInfo struct {
+	Symbol        string             `json:"symbol"`
+	BaseCoin      string             `json:"baseCoin"`
+	QuoteCoin     string             `json:"quoteCoin"`
+	Innovation    string             `json:"innovation"`
+	Status        string             `json:"status"`
+	LotSizeFilter BybitLotSizeFilter `json:"lotSizeFilter"`
+	PriceFilter   BybitPriceFilter   `json:"priceFilter"`
+}
+
+type BybitLotSizeFilter struct {
+	MaxOrderQty   string `json:"maxOrderQty"`
+	MinOrderQty   string `json:"minOrderQty"`
+	QtyStep       string `json:"qtyStep"`
+	BasePrecision string `json:"basePrecision"`
+}
+
+type BybitPriceFilter struct {
+	TickSize string `json:"tickSize"`
+	MinPrice string `json:"minPrice"`
+	MaxPrice string `json:"maxPrice"`
 }

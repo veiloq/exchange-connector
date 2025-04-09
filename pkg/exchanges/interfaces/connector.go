@@ -233,7 +233,11 @@ type ExchangeOptions struct {
 
 	// BaseURL is the base URL for the exchange API endpoints.
 	// This can be used to override the default URL for testing or custom proxy scenarios.
-	BaseURL string
+	BaseURL string // Typically used for WebSocket endpoint
+
+	// RestURL is the base URL for the exchange's REST API endpoints.
+	// If not provided, implementations should use a default production URL.
+	RestURL string
 
 	// HTTPTimeout specifies the maximum duration to wait for HTTP requests.
 	// This applies to all REST API calls to the exchange.
@@ -393,5 +397,6 @@ func NewExchangeOptions() *ExchangeOptions {
 		WSReconnectInterval:  5 * time.Second,
 		WSHeartbeatInterval:  20 * time.Second,
 		LogLevel:             "info",
+		// RestURL is intentionally left empty, implementations should provide defaults
 	}
 }
