@@ -14,7 +14,7 @@ BINARY_NAME=exchange-connector
 
 # Build parameters
 BUILD_DIR=build
-MAIN_PACKAGE=./pkg
+# MAIN_PACKAGE removed - not needed for library
 VERSION=$(shell cat VERSION 2>/dev/null || echo "v0.1.0")
 
 # TARGET: all
@@ -30,7 +30,7 @@ VERSION=$(shell cat VERSION 2>/dev/null || echo "v0.1.0")
 #
 # EXPLANATION:
 #   This is the default target that gets executed when running make without arguments
-all: deps test build
+all: deps test
 
 # TARGET: build
 #
@@ -45,80 +45,7 @@ all: deps test build
 #
 # EXPLANATION:
 #   Creates the build directory and compiles the main package
-build:
-	mkdir -p $(BUILD_DIR)
-	$(GOBUILD) -o $(BUILD_DIR)/$(BINARY_NAME) $(MAIN_PACKAGE)
-
-# TARGET: build-all
-#
-# DESCRIPTION:
-#   Builds binaries for all supported platforms ✅
-#
-# PREREQUISITES:
-#   - Go toolchain with cross-compilation support
-#
-# USAGE EXAMPLES:
-#   - make build-all
-#
-# EXPLANATION:
-#   Runs build targets for Linux (AMD64/ARM64) and macOS (AMD64/ARM64)
-build-all: build-linux-amd64 build-linux-arm64 build-darwin-amd64 build-darwin-arm64
-
-# TARGET: build-linux-amd64
-#
-# DESCRIPTION:
-#   Builds the binary for Linux AMD64 ✅
-#
-# PREREQUISITES:
-#   - Go toolchain with cross-compilation support
-#
-# USAGE EXAMPLES:
-#   - make build-linux-amd64
-build-linux-amd64:
-	mkdir -p $(BUILD_DIR)
-	GOOS=linux GOARCH=amd64 $(GOBUILD) -o $(BUILD_DIR)/$(BINARY_NAME)-linux-amd64 $(MAIN_PACKAGE)
-
-# TARGET: build-linux-arm64
-#
-# DESCRIPTION:
-#   Builds the binary for Linux ARM64 ✅
-#
-# PREREQUISITES:
-#   - Go toolchain with cross-compilation support
-#
-# USAGE EXAMPLES:
-#   - make build-linux-arm64
-build-linux-arm64:
-	mkdir -p $(BUILD_DIR)
-	GOOS=linux GOARCH=arm64 $(GOBUILD) -o $(BUILD_DIR)/$(BINARY_NAME)-linux-arm64 $(MAIN_PACKAGE)
-
-# TARGET: build-darwin-amd64
-#
-# DESCRIPTION:
-#   Builds the binary for macOS AMD64 (Intel) ✅
-#
-# PREREQUISITES:
-#   - Go toolchain with cross-compilation support
-#
-# USAGE EXAMPLES:
-#   - make build-darwin-amd64
-build-darwin-amd64:
-	mkdir -p $(BUILD_DIR)
-	GOOS=darwin GOARCH=amd64 $(GOBUILD) -o $(BUILD_DIR)/$(BINARY_NAME)-darwin-amd64 $(MAIN_PACKAGE)
-
-# TARGET: build-darwin-arm64
-#
-# DESCRIPTION:
-#   Builds the binary for macOS ARM64 (Apple Silicon) ✅
-#
-# PREREQUISITES:
-#   - Go toolchain with cross-compilation support
-#
-# USAGE EXAMPLES:
-#   - make build-darwin-arm64
-build-darwin-arm64:
-	mkdir -p $(BUILD_DIR)
-	GOOS=darwin GOARCH=arm64 $(GOBUILD) -o $(BUILD_DIR)/$(BINARY_NAME)-darwin-arm64 $(MAIN_PACKAGE)
+# Build targets removed - not applicable for a library
 
 # TARGET: test
 #
@@ -319,24 +246,12 @@ generate-mocks:
 	mockgen -source=pkg/websocket/connector.go -destination=test/mocks/mock_websocket.go -package=mocks
 	mockgen -source=pkg/common/http.go -destination=test/mocks/mock_http.go -package=mocks
 
-# TARGET: run-example
-#
-# DESCRIPTION:
-#   Builds and runs the example application ✅
-#
-# PREREQUISITES:
-#   - Go toolchain
-#
-# USAGE EXAMPLES:
-#   - make run-example
-run-example:
-	$(GOBUILD) -o $(BUILD_DIR)/example $(MAIN_PACKAGE)
-	$(BUILD_DIR)/example
+# run-example target removed - examples should be run directly with 'go run'
 
 # TARGET: release
 #
 # DESCRIPTION:
-#   Creates a new GitHub release with cross-platform binaries ✅
+#   Creates a new GitHub release tag ✅
 #
 # PREREQUISITES:
 #   - GitHub CLI (gh) installed
@@ -348,8 +263,8 @@ run-example:
 #   - VERSION=v1.2.3 make release
 #
 # EXPLANATION:
-#   Builds all platform binaries and creates a GitHub release with the specified version
-release: build-all
+#   Creates a GitHub release tag using the version specified in the VERSION file
+release:
 	@echo "Creating release $(VERSION)"
 	@if [ -z "$(shell which gh)" ]; then \
 		echo "GitHub CLI not found. Please install it first."; \
@@ -357,11 +272,8 @@ release: build-all
 	fi
 	@gh release create $(VERSION) \
 		--title "Exchange Connector $(VERSION)" \
-		--notes "Release $(VERSION)" \
-		$(BUILD_DIR)/$(BINARY_NAME)-linux-amd64 \
-		$(BUILD_DIR)/$(BINARY_NAME)-linux-arm64 \
-		$(BUILD_DIR)/$(BINARY_NAME)-darwin-amd64 \
-		$(BUILD_DIR)/$(BINARY_NAME)-darwin-arm64
+		--notes "Release $(VERSION)"
+# Removed build-all dependency and binary attachments - not typical for library releases
 
 # TARGET: help
 #
@@ -381,7 +293,7 @@ help:
 	@echo "Available targets:"
 	@echo "  all              - Run dependencies, tests, and build the binary"
 	@echo "  build            - Build the binary for the current platform"
-	@echo "  build-all        - Build binaries for all supported platforms"
+	@echo "  build            - Build the binary for the current platform"
 	@echo "  build-linux-amd64 - Build binary for Linux AMD64"
 	@echo "  build-linux-arm64 - Build binary for Linux ARM64" 
 	@echo "  build-darwin-amd64 - Build binary for macOS AMD64 (Intel)"
